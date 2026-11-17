@@ -1,4 +1,4 @@
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, sql, type SQL } from 'drizzle-orm';
 import { schema } from '@courier/db';
 import { LIMITS, startOfLocalDay, type ReportQuery } from '@courier/shared';
 import { appError } from '../errors';
@@ -14,6 +14,7 @@ import {
   type Ctx,
 } from './common';
 import { dispatcherDto } from './dto';
+import { escapeLike, searchIntent } from '../search';
 
 const d = schema.deliveries;
 
@@ -249,25 +250,64 @@ export async function closeShift(
 
 export type BoardOrder = 'oldest' | 'newest';
 
-export async function board(ctx: Ctx, order: BoardOrder = 'oldest') {
+export type BoardFilters = {
+  zone?: 'A' | 'B' | 'C';
+  status?: 'created' | 'failed_attempt';
+  q?: string;
+  shift?: 'on' | 'off' | 'all';
+  free?: boolean;
+};
+
+/** WHERE conditions for the queue; every user value is a bound parameter, LIKE input is escaped. */
+function queueConditions(f: BoardFilters): SQL[] {
+  const conds: SQL[] = [
+    f.status
+      ? sql`status = ${f.status}::delivery_status`
+      : sql`status in ('created', 'failed_attempt')`,
+  ];
+  if (f.zone) conds.push(sql`zone = ${f.zone}::zone`);
+  const text = f.q?.trim();
+  if (text) {
+    const intent = searchIntent(text);
+    const ors: SQL[] = [sql`recipient_name ilike ${`%${escapeLike(text)}%`} escape '\\'`];
+    if (intent.number !== undefined) ors.push(sql`number = ${intent.number}`);
+    if (intent.phone) ors.push(sql`recipient_phone = ${intent.phone}`);
+    if (intent.phonePrefix)
+      ors.push(sql`recipient_phone like ${`${escapeLike(intent.phonePrefix)}%`} escape '\\'`);
+    conds.push(sql`(${sql.join(ors, sql` or `)})`);
+  }
+  return conds;
+}
+
+export async function board(ctx: Ctx, order: BoardOrder = 'oldest', filters: BoardFilters = {}) {
   const now = ctx.clock.now();
   const limit = LIMITS.maxActivePerCourier;
   const dir = order === 'newest' ? sql`desc` : sql`asc`;
+  const where = sql.join(queueConditions(filters), sql` and `);
+  const shift = filters.shift ?? 'all';
+  const courierHaving = sql.join(
+    [
+      ...(shift === 'on' ? [sql`s.id is not null`] : shift === 'off' ? [sql`s.id is null`] : []),
+      ...(filters.free ? [sql`count(dl.id) < ${limit}`] : []),
+    ],
+    sql` and `,
+  );
+  const having = filters.free || shift !== 'all' ? sql`having ${courierHaving}` : sql``;
   const [queue, counts, couriers, blocked] = await Promise.all([
     ctx.db.execute<Record<string, unknown>>(sql`
       select * from (
         select id, public_number, zone, status, created_at, next_attempt_at, attempt_no, recipient_name, weight_g,
                row_number() over (partition by zone order by created_at ${dir}, id ${dir}) as rn
-        from deliveries where status in ('created', 'failed_attempt')
+        from deliveries where ${where}
       ) x where rn <= 25 order by zone, created_at ${dir}, id ${dir}`),
     ctx.db.execute<{ zone: string; status: string; n: number }>(sql`
-      select zone, status, count(*)::int as n from deliveries where status in ('created', 'failed_attempt') group by zone, status`),
+      select zone, status, count(*)::int as n from deliveries where ${where} group by zone, status`),
     ctx.db.execute<Record<string, unknown>>(sql`
       select c.user_id as id, p.full_name as name, s.id as shift_id, s.opened_at, count(dl.id)::int as active
       from couriers c join profiles p on p.user_id = c.user_id
       left join shifts s on s.courier_id = c.user_id and s.closed_at is null
       left join deliveries dl on dl.courier_id = c.user_id and dl.status in ('assigned', 'picked_up')
-      where c.active group by c.user_id, p.full_name, s.id, s.opened_at order by p.full_name`),
+      where c.active group by c.user_id, p.full_name, s.id, s.opened_at ${having} order by p.full_name`),
     ctx.db.execute<Record<string, unknown>>(sql`
       select dl.id, dl.public_number, dl.courier_id, p.full_name as courier_name, dl.wrong_code_streak
       from deliveries dl left join profiles p on p.user_id = dl.courier_id where dl.handover_blocked order by dl.updated_at`),

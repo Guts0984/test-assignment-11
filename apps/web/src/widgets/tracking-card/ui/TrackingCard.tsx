@@ -1,4 +1,5 @@
 'use client';
+import { useEffect, useRef } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useLocale, useTranslations } from 'next-intl';
 import type { DeliveryStatus } from '@courier/shared';
@@ -36,12 +37,26 @@ export function TrackingCard({ token }: { token: string }) {
   });
   // The broadcast channel is public (anyone who knows the unguessable name can also SEND to it), so its payload is never
   // shown. A message only means "something changed": the page then asks the API, which is the source of truth.
+  // Messages are coalesced: at most one refetch per 2 s, so someone flooding the public channel cannot make the page
+  // hammer the API (and get rate limited).
+  const pending = useRef<ReturnType<typeof setTimeout> | null>(null);
   useTrackingBroadcast(q.data?.channel, () => {
-    void qc.invalidateQueries({ queryKey: key });
+    if (pending.current) return;
+    pending.current = setTimeout(() => {
+      pending.current = null;
+      void qc.invalidateQueries({ queryKey: key });
+    }, 2000);
   });
+  useEffect(
+    () => () => {
+      if (pending.current) clearTimeout(pending.current);
+    },
+    [],
+  );
 
   if (q.isLoading) return <Spinner label={t('loading')} />;
-  if (q.isError)
+  // a failed REFETCH (e.g. rate limited) must not replace a page that is already showing data
+  if (q.isError && !q.data)
     return (
       <Alert>{isApiError(q.error) && q.error.status === 404 ? t('notFound') : t('error')}</Alert>
     );

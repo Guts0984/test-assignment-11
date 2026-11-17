@@ -45,7 +45,8 @@ export function createWebhookWorker(deps: WorkerDeps) {
   const resolve = deps.resolve ?? defaultResolve;
   const allowed = parseAllowedHosts(ctx.env.WEBHOOK_ALLOWED_PRIVATE_HOSTS);
   let timer: NodeJS.Timeout | undefined;
-  let running = false;
+  let loopOn = false;
+  let wakeLoop: (() => void) | undefined;
 
   /** SSRF guard: static URL rules, then every resolved address must be public (unless the host is allow-listed). */
   async function assertSafe(rawUrl: string): Promise<void> {
@@ -212,38 +213,101 @@ export function createWebhookWorker(deps: WorkerDeps) {
     return notification ? { notification, result } : null;
   }
 
+  const WORKERS = 8;
+  /** At most this many notifications of one sender are in flight in this process, so a dead receiver holds 2 of 8 slots. */
+  const PER_SENDER_INFLIGHT = 2;
+  const BATCH = 50;
+  const inflightBySender = new Map<string, number>();
+
+  let wake: (() => void) | null = null;
+  let wakeP: Promise<void> = new Promise((r) => (wake = r));
+  const notify = () => {
+    wake?.();
+    wakeP = new Promise((r) => (wake = r));
+  };
+
+  type Candidate = { id: string; sender_id: string };
+
   /**
-   * Sends everything that is due. Safe to call concurrently and from several processes. Fair: at most PER_SENDER due
-   * notifications per sender are taken in one round, so a sender whose server is dead (each try holds a worker for the
-   * full timeout) cannot starve everyone else's notifications.
+   * Due candidates: head of their delivery's queue only, oldest first, in a bounded batch served by notifications_due.
+   * Rows in flight are leased (next_attempt_at in the future), so they are not due. At most a few rows per sender, so no
+   * sender (a dead one with a long backlog) can crowd the others out of the batch.
+   * NOTE: an array inside a drizzle sql template expands to a tuple "($1, $2)", not an array, so ids are listed with
+   * sql.join (a `= any(${ids}::uuid[])` cast fails with "cannot cast type record to uuid[]").
    */
-  const PER_SENDER = 3;
-  async function tick(
-    opts: { senderId?: string; senderIds?: string[] } = {},
-  ): Promise<{ attempted: number }> {
+  async function fetchDue(opts: { senderId?: string; senderIds?: string[] }): Promise<Candidate[]> {
     const now = ctx.clock.now().toISOString();
-    const due = await ctx.db.execute<{ id: string }>(sql`
-      select id from (
-        select n.id, n.next_attempt_at,
+    const list = (xs: string[]) =>
+      sql.join(
+        xs.map((x) => sql`${x}::uuid`),
+        sql`, `,
+      );
+    const rows = await ctx.db.execute<Candidate>(sql`
+      select id, sender_id from (
+        select n.id, n.sender_id, n.next_attempt_at,
                row_number() over (partition by n.sender_id order by n.next_attempt_at, n.id) as rn
         from notifications n
         where n.status = 'pending' and n.next_attempt_at <= ${now}::timestamptz
-          ${opts.senderId ? sql`and n.sender_id = ${opts.senderId}` : sql``}
-          ${opts.senderIds ? sql`and n.sender_id = any(${opts.senderIds}::uuid[])` : sql``}
+          ${opts.senderId ? sql`and n.sender_id = ${opts.senderId}::uuid` : sql``}
+          ${opts.senderIds ? (opts.senderIds.length ? sql`and n.sender_id in (${list(opts.senderIds)})` : sql`and false`) : sql``}
           and not exists (select 1 from notifications p where p.delivery_id = n.delivery_id and p.seq < n.seq and p.status = 'pending')
-      ) x where rn <= ${PER_SENDER} order by next_attempt_at limit 50`);
+      ) x where rn <= ${PER_SENDER_INFLIGHT + 3} order by next_attempt_at, id limit ${BATCH}`);
+    return [...rows];
+  }
+
+  /**
+   * Sends everything that is due, then returns. A pool of WORKERS keeps picking the next due notification as soon as it
+   * is free (no lock-step rounds), with at most PER_SENDER_INFLIGHT in flight per sender. Safe to call concurrently and
+   * from several processes (the lease claim decides who sends).
+   */
+  async function tick(
+    opts: { senderId?: string; senderIds?: string[] } = {},
+  ): Promise<{ attempted: number }> {
     let attempted = 0;
-    const queue = [...due];
-    await Promise.all(
-      Array.from({ length: Math.min(8, queue.length) }, async () => {
-        for (;;) {
-          const next = queue.shift();
-          if (!next) return;
-          const r = await attempt(next.id).catch(() => null);
-          if (r) attempted++;
+    let buffer: Candidate[] = [];
+    const seen = new Set<string>(); // never tried twice in one tick
+    let refilling: Promise<void> | null = null;
+    let exhausted = false;
+    const takeEligible = (): Candidate | null => {
+      const i = buffer.findIndex(
+        (c) => !seen.has(c.id) && (inflightBySender.get(c.sender_id) ?? 0) < PER_SENDER_INFLIGHT,
+      );
+      return i < 0 ? null : buffer.splice(i, 1)[0]!;
+    };
+
+    async function refill(): Promise<void> {
+      buffer = (await fetchDue(opts)).filter((c) => !seen.has(c.id));
+      exhausted = buffer.length === 0;
+    }
+
+    async function worker(): Promise<void> {
+      for (;;) {
+        let c = takeEligible();
+        while (!c) {
+          // coalesce: one refill query at a time, shared by every idle worker
+          if (!refilling) refilling = refill().finally(() => (refilling = null));
+          await refilling;
+          c = takeEligible();
+          if (c) break;
+          if (exhausted) return; // nothing due (running ones re-check when they finish)
+          // due work exists but its senders are at their in-flight cap: wait for a slot
+          await Promise.race([wakeP, new Promise((r) => setTimeout(r, 100))]);
         }
-      }),
-    );
+        seen.add(c.id);
+        inflightBySender.set(c.sender_id, (inflightBySender.get(c.sender_id) ?? 0) + 1);
+        try {
+          const r = await attempt(c.id).catch(() => null);
+          if (r) attempted++;
+        } finally {
+          const left = (inflightBySender.get(c.sender_id) ?? 1) - 1;
+          if (left <= 0) inflightBySender.delete(c.sender_id);
+          else inflightBySender.set(c.sender_id, left);
+          notify();
+        }
+      }
+    }
+
+    await Promise.all(Array.from({ length: WORKERS }, worker));
     return { attempted };
   }
 
@@ -252,19 +316,26 @@ export function createWebhookWorker(deps: WorkerDeps) {
     attempt,
     resend,
     start() {
-      if (timer) return;
-      timer = setInterval(() => {
-        if (running) return;
-        running = true;
-        void tick()
-          .catch(() => undefined)
-          .finally(() => (running = false));
-      }, ctx.env.WEBHOOK_POLL_INTERVAL_MS);
-      timer.unref();
+      if (loopOn) return;
+      loopOn = true;
+      void (async () => {
+        while (loopOn) {
+          const r = await tick().catch(() => ({ attempted: 0 }));
+          if (!loopOn) break;
+          if (r.attempted === 0)
+            await new Promise<void>((res) => {
+              timer = setTimeout(res, ctx.env.WEBHOOK_POLL_INTERVAL_MS);
+              timer.unref();
+              wakeLoop = res;
+            });
+        }
+      })();
     },
     stop() {
-      if (timer) clearInterval(timer);
+      loopOn = false;
+      if (timer) clearTimeout(timer);
       timer = undefined;
+      wakeLoop?.();
     },
     assertSafe,
   };

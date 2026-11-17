@@ -26,10 +26,9 @@ export function ReportView() {
   const router = useRouter();
   const path = usePathname() ?? '';
   const sp = useSearchParams() ?? new URLSearchParams();
-  const spTo = sp.get('to') ?? '';
-  const spFrom = sp.get('from') ?? '';
-  const to = isCompleteDate(spTo) ? spTo : isoDay(new Date());
-  const from = isCompleteDate(spFrom) ? spFrom : isoDay(new Date(Date.now() - 89 * 86_400_000));
+  // a missing param falls back to the default period; a present-but-bad one (2026-02-30) is kept so it can be reported
+  const to = sp.get('to') ?? isoDay(new Date());
+  const from = sp.get('from') ?? isoDay(new Date(Date.now() - 89 * 86_400_000));
   const [draft, setDraft] = useState({ from, to });
   const [errors, setErrors] = useState<{ from?: string; to?: string }>({});
   useEffect(() => {
@@ -49,6 +48,9 @@ export function ReportView() {
   };
   const urlErrors = validate(from, to);
   const urlInvalid = !!(urlErrors.from || urlErrors.to);
+  // a bad period that came from the URL is shown on its field until the user edits the inputs
+  const fieldErrors =
+    draft.from === from && draft.to === to && urlInvalid ? { ...urlErrors, ...errors } : errors;
   const q = useQuery({
     queryKey: deliveryKeys.report(from, to),
     queryFn: () => fetchReport(from, to),
@@ -76,7 +78,7 @@ export function ReportView() {
           label={t('from')}
           type="date"
           value={draft.from}
-          error={errors.from}
+          error={fieldErrors.from}
           onChange={(e) => setDraft({ ...draft, from: e.target.value })}
         />
         <TextField
@@ -84,12 +86,11 @@ export function ReportView() {
           label={t('to')}
           type="date"
           value={draft.to}
-          error={errors.to}
+          error={fieldErrors.to}
           onChange={(e) => setDraft({ ...draft, to: e.target.value })}
         />
         <Button type="submit">{t('show')}</Button>
       </form>
-      {urlInvalid && <Alert>{urlErrors.from ?? urlErrors.to}</Alert>}
       {q.isLoading && <Spinner label={t('loading')} />}
       {q.isError && <Alert>{errorText(q.error)}</Alert>}
       {q.data && (

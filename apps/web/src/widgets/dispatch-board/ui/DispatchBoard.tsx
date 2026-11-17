@@ -2,17 +2,23 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useLocale, useTranslations } from 'next-intl';
 import { Alert, Button, SelectField, Spinner } from '@/shared/ui';
 import { useErrorText } from '@/shared/i18n';
 import { useRealtimeInvalidate } from '@/shared/api';
 import { formatDateTime, type AppLocale } from '@/shared/lib';
-import { fetchBoard, type BoardCourier, type BoardOrder } from '@/entities/board';
+import {
+  fetchBoard,
+  parseBoardFilters,
+  type BoardCourier,
+  type BoardOrder,
+} from '@/entities/board';
 import { deliveryKeys, StatusBadge } from '@/entities/delivery';
 import { AssignDialog } from '@/features/assign-delivery';
 import { CloseShiftDialog } from '@/features/close-shift';
 import { UnblockButton } from '@/features/unblock-handover';
+import { BoardFilterBar } from './BoardFilterBar';
 
 export function DispatchBoard() {
   const t = useTranslations('board');
@@ -22,21 +28,37 @@ export function DispatchBoard() {
   const path = usePathname() ?? '';
   const sp = useSearchParams() ?? new URLSearchParams();
   const order: BoardOrder = sp.get('order') === 'newest' ? 'newest' : 'oldest';
+  const filters = parseBoardFilters(sp);
   const board = useQuery({
-    queryKey: deliveryKeys.boardOrder(order),
-    queryFn: () => fetchBoard(order),
+    queryKey: deliveryKeys.boardView(order, filters), // still under ['board'] so realtime invalidation hits it
+    queryFn: () => fetchBoard(order, filters),
+    placeholderData: keepPreviousData, // the filter bar and list do not flash empty while a new filter loads
   });
   // the board updates by itself whenever a courier does something (RLS-filtered Realtime)
   useRealtimeInvalidate(['deliveries', 'shifts', 'assignments'], [deliveryKeys.board]);
   const [target, setTarget] = useState<{ id: string; number: string; status: string } | null>(null);
   const [closing, setClosing] = useState<BoardCourier | null>(null);
 
-  if (board.isLoading) return <Spinner label={t('loading')} />;
-  if (board.isError) return <Alert>{errorText(board.error)}</Alert>;
+  const bar = <BoardFilterBar filters={filters} />;
+  if (board.isLoading)
+    return (
+      <div className="flex flex-col gap-8">
+        {bar}
+        <Spinner label={t('loading')} />
+      </div>
+    );
+  if (board.isError)
+    return (
+      <div className="flex flex-col gap-8">
+        {bar}
+        <Alert>{errorText(board.error)}</Alert>
+      </div>
+    );
   const b = board.data!;
 
   return (
     <div className="flex flex-col gap-8">
+      {bar}
       {b.blocked.length > 0 && (
         <section
           aria-labelledby="sec-blocked"
@@ -142,6 +164,9 @@ export function DispatchBoard() {
         <h2 id="sec-couriers" className="mb-3 text-lg font-semibold">
           {t('couriers')}
         </h2>
+        {b.couriers.length === 0 && (
+          <p className="mb-2 text-sm text-slate-600">{t('noCouriers')}</p>
+        )}
         <div
           className="overflow-x-auto rounded-md border border-slate-200 bg-white"
           tabIndex={0}

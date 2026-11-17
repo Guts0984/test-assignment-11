@@ -505,24 +505,27 @@ describe('notification log and manual resend', () => {
         const poll = setInterval(async () => {
           const [r] = await h.sql<
             { n: number }[]
-          >`select count(*)::int n from pg_stat_activity where state = 'idle in transaction' and datname = current_database()`;
+          >`select count(*)::int n from pg_stat_activity where state = 'idle in transaction' and now() - state_change > interval '250 ms' and datname = current_database()`;
           idle.push(r!.n);
         }, 50);
-        // ONE unfiltered round, exactly what the background loop does
-        await h.api.worker.tick();
-        clearInterval(poll);
-
-        const [mineRow] = await notes(d.id);
-        expect(mineRow!.status, 'the healthy sender is served in the first round').toBe(
-          'delivered',
+        const started = performance.now();
+        // the tick runs in the background (24 hung calls, 2 at a time, take several seconds); the healthy sender must not wait for it
+        const tick = h.api.worker.tick({
+          senderIds: [dead.sender.user.id, healthy.sender.user.id],
+        });
+        let status = 'pending';
+        while (status !== 'delivered' && performance.now() - started < 15_000) {
+          status = (await notes(d.id))[0]?.status ?? status;
+          if (status !== 'delivered') await new Promise((r) => setTimeout(r, 25));
+        }
+        const elapsed = performance.now() - started;
+        expect(status, 'the healthy sender is served').toBe('delivered');
+        expect(elapsed, 'within about one request time, not behind the dead sender').toBeLessThan(
+          2000,
         );
-        const deadTried = await h.sql<
-          { n: number }[]
-        >`select count(*)::int n from public.notifications where sender_id = ${dead.sender.user.id} and attempts > 0`;
-        expect(
-          deadTried[0]!.n,
-          'the dead sender gets only its fair share per round',
-        ).toBeLessThanOrEqual(3);
+        const r = await tick;
+        clearInterval(poll);
+        expect(r.attempted).toBeGreaterThanOrEqual(25); // everything due was attempted
         expect(
           Math.max(0, ...idle),
           'no connection waits "idle in transaction" for the receiver',
@@ -530,6 +533,70 @@ describe('notification log and manual resend', () => {
       } finally {
         await blackHole.close();
       }
+    },
+    T,
+  );
+
+  it(
+    'a dead sender never has more than 2 requests in flight at its receiver',
+    async () => {
+      const dead = await newSender();
+      const blackHole = await createStub({ secret: SECRET });
+      blackHole.state.mode = 'hang';
+      let open = 0;
+      let peak = 0;
+      blackHole.server.on('request', (req, res) => {
+        open++;
+        peak = Math.max(peak, open);
+        let done = false;
+        const end = () => {
+          if (!done) {
+            done = true;
+            open--;
+          }
+        };
+        res.on('close', end);
+      });
+      try {
+        await h.sql`update public.sender_webhooks set url = ${`${blackHole.url}/hook`} where sender_id = ${dead.sender.user.id}`;
+        for (let i = 0; i < 8; i++) await createViaApi(h, dead.sender.accessToken);
+        const r = await h.api.worker.tick({ senderId: dead.sender.user.id });
+        expect(r.attempted).toBe(8);
+        expect(peak, 'the cap is reached but never exceeded').toBe(2);
+      } finally {
+        await blackHole.close();
+      }
+    },
+    T,
+  );
+
+  it(
+    'one healthy sender with a big backlog drains at >= 30 notifications per second, in order per delivery',
+    async () => {
+      const a = await newSender();
+      stub.state.mode = 'ok';
+      const ids: string[] = [];
+      for (let i = 0; i < 60; i++) ids.push((await createViaApi(h, a.sender.accessToken)).id);
+      for (const id of ids.slice(0, 8))
+        await assign(h, a.dispatcher.accessToken, id, a.courier.user.id);
+      const [{ c } = { c: -1 }] = await h.sql<
+        { c: number }[]
+      >`select count(*)::int c from public.notifications where sender_id = ${a.sender.user.id} and status = 'pending'`;
+      expect(c).toBe(68);
+      const started = performance.now();
+      await h.api.worker.tick({ senderId: a.sender.user.id });
+      const elapsed = performance.now() - started;
+      const [{ left } = { left: -1 }] = await h.sql<
+        { left: number }[]
+      >`select count(*)::int left from public.notifications where sender_id = ${a.sender.user.id} and status = 'pending'`;
+      expect(left).toBe(0);
+      expect(elapsed, `68 notifications in ${Math.round(elapsed)} ms`).toBeLessThan(6000);
+      for (const id of ids.slice(0, 8))
+        expect(mine(id).map((x) => (x.body as { event: string }).event)).toEqual([
+          'created',
+          'assigned',
+        ]);
+      for (const id of ids) expect(mine(id).length).toBeGreaterThanOrEqual(1);
     },
     T,
   );

@@ -28,6 +28,12 @@ export function FiltersBar({
     setDraft(next);
   };
 
+  const badRange = (f: ListFilters) =>
+    isCompleteDate(f.from) && isCompleteDate(f.to) && f.to < f.from;
+  /** Never push a reversed range: keep what the URL holds for the dates, the rest of the draft still applies. */
+  const sane = (f: ListFilters): ListFilters =>
+    badRange(f) ? { ...f, from: applied.current.from, to: applied.current.to } : f;
+
   const toggle = (s: DeliveryStatus) => {
     const cur = latest.current;
     const next = {
@@ -36,7 +42,9 @@ export function FiltersBar({
       status: cur.status.includes(s) ? cur.status.filter((x) => x !== s) : [...cur.status, s],
     };
     update(next); // the checkbox responds at once; the URL follows
-    onApply(next);
+    const out = sane(next);
+    applied.current = out;
+    onApply(out);
   };
 
   // A date typed with the keyboard passes through half-valid values: keep them in the draft,
@@ -45,6 +53,7 @@ export function FiltersBar({
     const next = { ...latest.current, [key]: v, page: 1 };
     update(next);
     if (v === '' ? applied.current[key] === '' : !isCompleteDate(v)) return; // nothing to apply yet
+    if (badRange(next)) return; // the error under "To" explains it; the typed text stays
     const other = key === 'from' ? 'to' : 'from';
     const o = next[other];
     const out = { ...next, [other]: o === '' || isCompleteDate(o) ? o : applied.current[other] };
@@ -59,7 +68,9 @@ export function FiltersBar({
       className="flex flex-col gap-3 rounded-md border border-slate-200 bg-white p-3"
       onSubmit={(e) => {
         e.preventDefault();
-        onApply({ ...latest.current, page: 1 });
+        const out = sane({ ...latest.current, page: 1 });
+        applied.current = out;
+        onApply(out);
       }}
     >
       <div className="grid gap-3 md:grid-cols-[2fr_1fr_1fr_auto]">
@@ -80,6 +91,7 @@ export function FiltersBar({
           label={t('to')}
           type="date"
           value={draft.to}
+          error={badRange(draft) ? t('errToBeforeFrom') : undefined}
           onChange={(e) => changeDate('to', e.target.value)}
         />
         <div className="flex items-end gap-2">

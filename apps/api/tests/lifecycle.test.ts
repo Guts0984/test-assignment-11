@@ -942,6 +942,131 @@ describe('dispatcher board and report', () => {
     expect((bad.body as unknown as Err).error.code).toBe('VALIDATION_FAILED');
   });
 
+  describe('board filters', () => {
+    type FB = {
+      zones: { zone: string; waiting: number; items: { id: string; status: string }[] }[];
+      couriers: { id: string; onShift: boolean; active: number }[];
+    };
+    const get = (token: string, q: string) => call<FB>(h, 'GET', `/dispatch/board?${q}`, { token });
+    const ids = (b: FB) => b.zones.flatMap((z) => z.items.map((i) => i.id)).sort();
+    const tag = () => `Zq${randomUUID().replace(/-/g, '').slice(0, 10)}`;
+
+    it('filters by zone, status, and searches by number, phone and name; filters combine', async () => {
+      const a = await makeActors(h.sql);
+      const t = tag();
+      const phone = `+38050${String(Math.floor(1_000_000 + Math.random() * 8_999_999))}`;
+      const dA = await createViaApi(h, a.sender.accessToken, {
+        zone: 'A',
+        recipientName: `${t} Alpha`,
+        recipientPhone: phone,
+      });
+      const picked = await pickedUp(h, a, { zone: 'B', recipientName: `${t} Beta` });
+      const dB = picked.d;
+      const photo = await uploadPhotoVia(h, a.courier.accessToken, dB.id, 'failed');
+      await sendActions(h, a.courier.accessToken, [act.fail(dB.id, photo.photoId, 'no_access')]);
+      await h.sql`update public.deliveries set next_attempt_at = now() + interval '1 day' where id = ${dB.id}`;
+      const tok = a.dispatcher.accessToken;
+
+      const byName = await get(tok, `q=${t}`);
+      expect(byName.status).toBe(200);
+      expect(ids(byName.body)).toEqual([dA.id, dB.id].sort());
+      expect(byName.body.zones.map((z) => z.zone)).toEqual(['A', 'B', 'C']);
+      expect(byName.body.zones.map((z) => z.waiting)).toEqual([1, 1, 0]);
+      // case-insensitive substring
+      expect(ids((await get(tok, `q=${t.toLowerCase()}%20alp`)).body)).toEqual([dA.id]);
+
+      const zoneB = await get(tok, `q=${t}&zone=B`);
+      expect(zoneB.body.zones.map((z) => [z.zone, z.waiting, z.items.length])).toEqual([
+        ['A', 0, 0],
+        ['B', 1, 1],
+        ['C', 0, 0],
+      ]);
+      expect(ids((await get(tok, `q=${t}&status=failed_attempt`)).body)).toEqual([dB.id]);
+      expect(ids((await get(tok, `q=${t}&status=created`)).body)).toEqual([dA.id]);
+      // combined: zone A AND failed_attempt matches nothing
+      const none = await get(tok, `q=${t}&zone=A&status=failed_attempt`);
+      expect(ids(none.body)).toEqual([]);
+      expect(none.body.zones.map((z) => z.waiting)).toEqual([0, 0, 0]);
+
+      // by number (DLV-… and plain digits) and by phone / phone prefix
+      const num = dA.number;
+      expect(ids((await get(tok, `q=${encodeURIComponent(num)}`)).body)).toContain(dA.id);
+      expect(ids((await get(tok, `q=${Number(num.slice(4))}`)).body)).toContain(dA.id);
+      expect(ids((await get(tok, `q=${encodeURIComponent(phone)}`)).body)).toEqual([dA.id]);
+      expect(ids((await get(tok, `q=${encodeURIComponent(phone.slice(0, 9))}`)).body)).toContain(
+        dA.id,
+      );
+      // LIKE metacharacters are literal
+      expect(ids((await get(tok, `q=${encodeURIComponent(`${t}%`)}`)).body)).toEqual([]);
+      expect(ids((await get(tok, `q=${encodeURIComponent('_'.repeat(5))}`)).body)).toEqual([]);
+    });
+
+    it('shift and free filters apply to the couriers list only', async () => {
+      const a = await makeActors(h.sql);
+      const tok = a.dispatcher.accessToken;
+      const all = await get(tok, '');
+      const on = await get(tok, 'shift=on');
+      const off = await get(tok, 'shift=off');
+      expect(all.body.couriers.length).toBeGreaterThan(0);
+      expect(on.body.couriers.every((c) => c.onShift)).toBe(true);
+      expect(off.body.couriers.every((c) => !c.onShift)).toBe(true);
+      expect(on.body.couriers.length + off.body.couriers.length).toBe(all.body.couriers.length);
+      expect(on.body.couriers.map((c) => c.id)).toContain(a.courier.user.id);
+      expect((await get(tok, 'shift=all')).body.couriers.length).toBe(all.body.couriers.length);
+
+      // fill one courier to the limit of 8
+      for (let i = 0; i < 8; i++) {
+        const d = await createViaApi(h, a.sender.accessToken);
+        await assign(h, tok, d.id, a.courier.user.id);
+      }
+      for (const free of ['true', '1']) {
+        const f = await get(tok, `free=${free}`);
+        expect(f.body.couriers.map((c) => c.id)).not.toContain(a.courier.user.id);
+        expect(f.body.couriers.map((c) => c.id)).toContain(a.courier2.user.id);
+        expect(f.body.couriers.every((c) => c.active < 8)).toBe(true);
+      }
+      expect((await get(tok, 'free=false')).body.couriers.map((c) => c.id)).toContain(
+        a.courier.user.id,
+      );
+      const both = await get(tok, 'free=true&shift=on');
+      expect(both.body.couriers.every((c) => c.onShift && c.active < 8)).toBe(true);
+      // the queue is not affected by the courier filters
+      expect(ids((await get(tok, 'shift=off')).body)).toEqual(ids(all.body));
+    });
+
+    it('invalid values are 400, unknown keys are ignored, injection strings are harmless', async () => {
+      const a = await makeActors(h.sql, { shifts: false });
+      const tok = a.dispatcher.accessToken;
+      for (const q of [
+        'zone=D',
+        'zone=a',
+        'status=delivered',
+        'shift=maybe',
+        'free=yes',
+        `q=${'x'.repeat(65)}`,
+      ]) {
+        const r = await call<Err>(h, 'GET', `/dispatch/board?${q}`, { token: tok });
+        expect(r.status, q).toBe(400);
+        expect(r.body.error.code).toBe('VALIDATION_FAILED');
+      }
+      expect((await get(tok, 'whatever=1&other=%00')).status).toBe(200);
+      const before = await h.sql<{ n: number }[]>`select count(*)::int n from public.deliveries`;
+      for (const evil of [
+        `'; drop table deliveries; --`,
+        `' or 1=1 --`,
+        `%' or ''='`,
+        `\\`,
+        `");select pg_sleep(5);--`,
+      ]) {
+        const r = await get(tok, `q=${encodeURIComponent(evil)}`);
+        expect(r.status, evil).toBe(200);
+        expect(ids(r.body)).toEqual([]);
+      }
+      const after = await h.sql<{ n: number }[]>`select count(*)::int n from public.deliveries`;
+      expect(after[0]!.n).toBeGreaterThanOrEqual(before[0]!.n);
+    });
+  });
+
   it('the report equals the database for the same period: delivered,mean time, failures by reason, cash discrepancies', async () => {
     const a = await makeActors(h.sql);
     // seed-independent ground truth for a window that only contains this run's data: use the exact current Kyiv day

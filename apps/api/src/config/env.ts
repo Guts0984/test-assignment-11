@@ -20,6 +20,9 @@ const schema = z.object({
   PHOTO_MAX_BYTES: int(5_242_880, 1),
   SIGNED_URL_TTL_SECONDS: int(300, 10),
 
+  // auth: a positive session lookup is reused this long, so a signed-out token dies within this many seconds (0 = always ask)
+  AUTH_SESSION_CACHE_SECONDS: int(10, 0),
+
   // http
   API_PORT: int(4000, 0),
   API_HOST: z.string().default('0.0.0.0'),

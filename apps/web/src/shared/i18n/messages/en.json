@@ -10,7 +10,10 @@
     "allDeliveries": "All deliveries",
     "report": "Report",
     "courier": "Courier",
-    "signOut": "Sign out"
+    "signOut": "Sign out",
+    "signOutTitle": "Sign out?",
+    "signOutCancel": "Cancel",
+    "signOutAnyway": "Sign out anyway"
   },
   "locale": {
     "label": "Language"
@@ -129,7 +132,8 @@
     "to": "To",
     "apply": "Search",
     "reset": "Reset",
-    "status": "Status"
+    "status": "Status",
+    "errToBeforeFrom": "The end date must not be before the start date"
   },
   "create": {
     "title": "New delivery",
@@ -218,7 +222,17 @@
     "order": "Queue order",
     "orderOldest": "Oldest first",
     "orderNewest": "Newest first",
-    "couriersRegion": "Couriers table, scrollable"
+    "couriersRegion": "Couriers table, scrollable",
+    "filtersLabel": "Board filters",
+    "filterZone": "Zone",
+    "filterAll": "All",
+    "filterStatus": "Status",
+    "filterSearch": "Search the queue",
+    "filterSearchHint": "Number, phone or recipient name; press Enter",
+    "filterShift": "Courier shift",
+    "filterFree": "Only couriers with free capacity",
+    "filterReset": "Reset filters",
+    "noCouriers": "No couriers match."
   },
   "assign": {
     "title": "Assign {number}",
@@ -362,6 +376,7 @@
     "reason": "Reason",
     "note": "Note",
     "failPhoto": "Photo of the door or entrance",
-    "confirmFail": "Confirm"
+    "confirmFail": "Confirm",
+    "signOutPending": "{count, plural, one {# action is} other {# actions are}} still waiting to be sent from this phone. They stay saved and will be sent the next time you sign in. Sign out anyway?"
   }
 }

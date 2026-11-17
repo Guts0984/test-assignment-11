@@ -1,4 +1,5 @@
 import { api } from '@/shared/api';
+import { boardFilterParams, EMPTY_BOARD_FILTERS, type BoardFilters } from '../model/filters';
 import type { DeliveryStatus, Zone } from '@courier/shared';
 
 export type BoardItem = {
@@ -66,8 +67,13 @@ export type Report = {
 };
 
 export type BoardOrder = 'oldest' | 'newest';
-export const fetchBoard = (order: BoardOrder = 'oldest') =>
-  api<Board>(`/dispatch/board?order=${order}`);
+export const fetchBoard = (
+  order: BoardOrder = 'oldest',
+  filters: BoardFilters = EMPTY_BOARD_FILTERS,
+) =>
+  api<Board>(
+    `/dispatch/board?${new URLSearchParams([['order', order], ...boardFilterParams(filters)])}`,
+  );
 export const fetchShift = (courierId: string) =>
   api<ShiftSummary>(`/dispatch/couriers/${courierId}/shift`);
 export const closeShift = (courierId: string, handedCashKop: number) =>

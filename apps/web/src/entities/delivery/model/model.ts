@@ -65,6 +65,7 @@ export const deliveryKeys = {
   photos: (id: string) => ['deliveries', 'photos', id] as const,
   board: ['board'] as const,
   boardOrder: (order: string) => ['board', order] as const,
+  boardView: (order: string, filters: unknown) => ['board', order, filters] as const,
   report: (from: string, to: string) => ['report', from, to] as const,
   notifications: (query: string) => ['notifications', query] as const,
   webhook: ['webhook'] as const,

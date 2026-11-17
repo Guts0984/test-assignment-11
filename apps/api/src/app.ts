@@ -7,6 +7,7 @@ import { json, raw, type NextFunction, type Request, type Response } from 'expre
 import helmet from 'helmet';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { JWTVerifyGetKey } from 'jose';
+import { sql } from 'drizzle-orm';
 import { loadEnv, type Env } from './config/env';
 import { createAuthVerifier, type AuthVerifier } from './common/auth';
 import { AllExceptionsFilter } from './common/exception.filter';
@@ -95,7 +96,13 @@ export async function createApp(opts: AppOptions = {}): Promise<RunningApp> {
   const storage = opts.storage ?? createStorageClient(env);
   const limiters = buildLimiters(env);
   const ctx: Ctx = { db: dbHandle.db, env, clock };
-  const verifier = opts.verifier ?? createAuthVerifier(env, opts.jwks);
+  const verifier =
+    opts.verifier ??
+    createAuthVerifier(env, {
+      jwks: opts.jwks,
+      sessionExists: async (id) =>
+        (await dbHandle.db.execute(sql`select 1 from auth.sessions where id = ${id}`)).length > 0,
+    });
   const worker = createWebhookWorker({ ctx, ...(opts.worker ?? {}) });
   const gate = createInflightGate({
     perKey: env.MAX_INFLIGHT_PER_IP,

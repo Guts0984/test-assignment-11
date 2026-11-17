@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { createRateLimiter } from '../src/domain/rate-limit';
 import { generateKeyPair, SignJWT, exportJWK } from 'jose';
@@ -411,7 +411,17 @@ describe('hostile payloads never cause a 5xx and never crash the server', () => 
 
 describe('forged and abused credentials', () => {
   const env = testEnv();
+  // a session that really exists, so each forged token below fails for its OWN flaw, not for the missing session
+  let liveSession = '';
+  beforeAll(async () => {
+    const a = await world();
+    const claims = JSON.parse(
+      Buffer.from(a.dispatcher.accessToken.split('.')[1]!, 'base64url').toString(),
+    ) as { session_id: string };
+    liveSession = claims.session_id;
+  });
   const base = () => ({
+    session_id: liveSession,
     aud: 'authenticated',
     role: 'authenticated',
     sub: randomUUID(),
@@ -421,9 +431,25 @@ describe('forged and abused credentials', () => {
   });
   const me = (token: string) => rawCall(h, '127.0.0.50', 'GET', '/me', { token });
 
-  it('accepts a correctly signed token only when the claims check out (control)', async () => {
-    const ok = await me(signJwt(base(), env.jwtSecret));
-    expect(ok.status).toBe(200); // legacy HS256 secret is configured in this test server
+  it('refuses a forged HS256 token even with the RIGHT secret: no live session behind it', async () => {
+    // the legacy secret is configured in this test server, so signature, issuer, audience and role all pass
+    const { session_id: _omit, ...noSession } = base();
+    expect((await me(signJwt(noSession, env.jwtSecret))).status).toBe(401);
+    // a made-up session id does not help either
+    expect((await me(signJwt({ ...base(), session_id: randomUUID() }, env.jwtSecret))).status).toBe(
+      401,
+    );
+    expect((await me(signJwt({ ...base(), session_id: 'not-a-uuid' }, env.jwtSecret))).status).toBe(
+      401,
+    );
+  });
+
+  it('control: everything valid (right secret AND a live session id) is accepted, so the rejections below are specific', async () => {
+    expect((await me(signJwt(base(), env.jwtSecret))).status).toBe(200);
+  });
+
+  it('accepts a real GoTrue token', async () => {
+    expect((await me((await world()).dispatcher.accessToken)).status).toBe(200);
   });
 
   it.each([

@@ -10,7 +10,10 @@
     "allDeliveries": "Усі доставки",
     "report": "Звіт",
     "courier": "Кур'єр",
-    "signOut": "Вийти"
+    "signOut": "Вийти",
+    "signOutTitle": "Вийти?",
+    "signOutCancel": "Скасувати",
+    "signOutAnyway": "Все одно вийти"
   },
   "locale": {
     "label": "Мова"
@@ -129,7 +132,8 @@
     "to": "До",
     "apply": "Шукати",
     "reset": "Скинути",
-    "status": "Статус"
+    "status": "Статус",
+    "errToBeforeFrom": "Кінцева дата не може бути раніше за початкову"
   },
   "create": {
     "title": "Нова доставка",
@@ -218,7 +222,17 @@
     "order": "Порядок черги",
     "orderOldest": "Спочатку старіші",
     "orderNewest": "Спочатку новіші",
-    "couriersRegion": "Таблиця кур’єрів, прокручувана"
+    "couriersRegion": "Таблиця кур’єрів, прокручувана",
+    "filtersLabel": "Фільтри дошки",
+    "filterZone": "Зона",
+    "filterAll": "Усі",
+    "filterStatus": "Статус",
+    "filterSearch": "Пошук у черзі",
+    "filterSearchHint": "Номер, телефон або ім’я отримувача; натисніть Enter",
+    "filterShift": "Зміна кур’єра",
+    "filterFree": "Лише кур’єри з вільним місцем",
+    "filterReset": "Скинути фільтри",
+    "noCouriers": "Немає відповідних кур’єрів."
   },
   "assign": {
     "title": "Призначити {number}",
@@ -362,6 +376,7 @@
     "reason": "Причина",
     "note": "Примітка",
     "failPhoto": "Фото дверей або під'їзду",
-    "confirmFail": "Підтвердити"
+    "confirmFail": "Підтвердити",
+    "signOutPending": "{count, plural, one {# дія очікує} few {# дії очікують} many {# дій очікують} other {# дії очікують}} на надсилання з цього телефона. Вони залишаються збереженими й будуть надіслані, коли ви наступного разу увійдете. Все одно вийти?"
   }
 }

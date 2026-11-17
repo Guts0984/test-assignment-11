@@ -11,6 +11,7 @@ const h = vi.hoisted(() => ({
   params: new URLSearchParams(),
   push: vi.fn(),
   replace: vi.fn(),
+  signOut: vi.fn(async () => ({})),
 }));
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: h.push, replace: h.replace, refresh: vi.fn() }),
@@ -24,6 +25,7 @@ vi.mock('@/shared/api/supabase', () => {
   };
   return {
     getSupabase: () => ({
+      auth: { signOut: h.signOut },
       realtime: { setAuth: async () => undefined },
       channel: () => channel,
       removeChannel: async () => undefined,
@@ -39,6 +41,8 @@ import { DeliverDialog, FailDialog } from '@/features/courier-actions';
 import { ReportView } from '@/widgets/report-view';
 import { DispatchBoard } from '@/widgets/dispatch-board';
 import { EMPTY_FILTERS } from '@/shared/lib';
+import { SignOutButton } from '@/features/sign-in';
+import { onSignOutWarning } from '@/shared/api';
 
 const fetchMock = vi.fn();
 beforeEach(() => {
@@ -46,6 +50,7 @@ beforeEach(() => {
   fetchMock.mockReset();
   h.push.mockReset();
   h.replace.mockReset();
+  h.signOut.mockClear();
   h.params = new URLSearchParams();
 });
 
@@ -363,5 +368,131 @@ describe('courier dialogs move focus to the first invalid field', () => {
     await userEvent.selectOptions(screen.getByLabelText('Reason'), 'other');
     await userEvent.click(screen.getByRole('button', { name: 'Confirm' }));
     expect(screen.getByLabelText('Note')).toHaveFocus();
+  });
+});
+
+describe('FiltersBar reversed date range', () => {
+  it('shows an error under "To", applies nothing, keeps both texts, and recovers when fixed', () => {
+    const onApply = vi.fn();
+    renderApp(<FiltersBar value={EMPTY_FILTERS} onApply={onApply} />);
+    const from = screen.getByLabelText('From');
+    const to = screen.getByLabelText('To');
+    fireEvent.change(from, { target: { value: '2026-03-10' } });
+    onApply.mockClear();
+    fireEvent.change(to, { target: { value: '2026-03-01' } });
+    expect(onApply).not.toHaveBeenCalled();
+    expect(to).toHaveValue('2026-03-01');
+    expect(from).toHaveValue('2026-03-10');
+    expect(to).toHaveAttribute('aria-invalid', 'true');
+    expect(to).toHaveAccessibleDescription('The end date must not be before the start date');
+    fireEvent.change(to, { target: { value: '2026-03-20' } });
+    expect(to).not.toHaveAttribute('aria-invalid');
+    expect(onApply).toHaveBeenLastCalledWith(
+      expect.objectContaining({ from: '2026-03-10', to: '2026-03-20' }),
+    );
+  });
+});
+
+describe('ReportView non-existent dates in the URL', () => {
+  it('says "not a valid date" under the offending input, not "start after end"', () => {
+    h.params = new URLSearchParams('from=2026-01-01&to=2026-02-30');
+    renderApp(<ReportView />);
+    expect(screen.getByLabelText('To')).toHaveAccessibleDescription('Enter a valid date');
+    expect(screen.getByLabelText('From')).not.toHaveAttribute('aria-invalid');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+  it('flags a bad start date and keeps the from>to message for real dates', () => {
+    h.params = new URLSearchParams('from=2026-02-30&to=2026-03-01');
+    const first = renderApp(<ReportView />);
+    expect(screen.getByLabelText('From')).toHaveAccessibleDescription('Enter a valid date');
+    first.unmount();
+    h.params = new URLSearchParams('from=2026-03-02&to=2026-03-01');
+    renderApp(<ReportView />);
+    expect(screen.getByLabelText('From')).toHaveAccessibleDescription(
+      'The start date must not be after the end date',
+    );
+  });
+});
+
+describe('SignOutButton warnings', () => {
+  it('signs out at once when nothing is waiting', async () => {
+    renderApp(<SignOutButton />);
+    await userEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    await waitFor(() => expect(h.signOut).toHaveBeenCalled());
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('asks first when a warning is registered; Cancel keeps the session, Sign out anyway ends it', async () => {
+    const off = onSignOutWarning(() => '3 actions are still waiting. Sign out anyway?');
+    renderApp(<SignOutButton />);
+    await userEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent('3 actions are still waiting. Sign out anyway?');
+    expect(h.signOut).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(h.signOut).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Sign out anyway' }));
+    await waitFor(() => expect(h.signOut).toHaveBeenCalledTimes(1));
+    off();
+  });
+});
+
+describe('DispatchBoard filters', () => {
+  const board = {
+    generatedAt: '2026-01-01T00:00:00Z',
+    zones: [{ zone: 'A', waiting: 0, items: [] }],
+    couriers: [],
+    blocked: [],
+  };
+  beforeEach(() => fetchMock.mockImplementation(async () => jsonResponse(board)));
+
+  it('sends the URL filters to the API and shows them in the controls', async () => {
+    h.params = new URLSearchParams('zone=B&status=failed_attempt&q=Ola&shift=on&free=1');
+    renderApp(<DispatchBoard />);
+    expect(await screen.findByLabelText('Zone')).toHaveValue('B');
+    const url = String(fetchMock.mock.calls[0]![0]);
+    expect(url).toContain('order=oldest');
+    for (const part of ['zone=B', 'status=failed_attempt', 'q=Ola', 'shift=on', 'free=1'])
+      expect(url).toContain(part);
+    expect(screen.getByLabelText('Status')).toHaveValue('failed_attempt');
+    expect(screen.getByLabelText('Search the queue')).toHaveValue('Ola');
+    expect(screen.getByLabelText('Courier shift')).toHaveValue('on');
+    expect(screen.getByLabelText('Only couriers with free capacity')).toBeChecked();
+  });
+
+  it('ignores invalid URL values and sends no filter params by default', async () => {
+    h.params = new URLSearchParams('zone=Z&shift=maybe&free=yes');
+    renderApp(<DispatchBoard />);
+    await screen.findByLabelText('Zone');
+    expect(String(fetchMock.mock.calls[0]![0])).toMatch(/board\?order=oldest$/);
+  });
+
+  it('pushes changes to the URL (Back works), keeps order, omits defaults; search submits with Enter', async () => {
+    h.params = new URLSearchParams('order=newest');
+    renderApp(<DispatchBoard />);
+    fireEvent.change(await screen.findByLabelText('Zone'), { target: { value: 'C' } });
+    expect(h.push).toHaveBeenLastCalledWith('/dispatcher/report?order=newest&zone=C');
+    await userEvent.click(screen.getByLabelText('Only couriers with free capacity'));
+    expect(h.push).toHaveBeenLastCalledWith('/dispatcher/report?order=newest&free=1');
+    fireEvent.change(screen.getByLabelText('Courier shift'), { target: { value: 'off' } });
+    expect(h.push).toHaveBeenLastCalledWith('/dispatcher/report?order=newest&shift=off');
+    h.push.mockClear();
+    await userEvent.type(screen.getByLabelText('Search the queue'), 'DLV-000123');
+    expect(h.push).not.toHaveBeenCalled(); // typing alone does not search
+    await userEvent.keyboard('{Enter}');
+    expect(h.push).toHaveBeenCalledWith('/dispatcher/report?order=newest&q=DLV-000123');
+  });
+
+  it('refetches with a different query key when the filters change, and Reset clears them', async () => {
+    h.params = new URLSearchParams('zone=A');
+    const { rerender } = renderKeep(<DispatchBoard />);
+    await screen.findByLabelText('Zone');
+    h.params = new URLSearchParams('zone=B');
+    fetchMock.mockClear();
+    rerender(<DispatchBoard />);
+    await waitFor(() => expect(String(fetchMock.mock.calls[0]![0])).toContain('zone=B'));
+    await userEvent.click(screen.getByRole('button', { name: 'Reset filters' }));
+    expect(h.push).toHaveBeenLastCalledWith('/dispatcher/report');
   });
 });

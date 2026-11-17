@@ -22,6 +22,17 @@ describe('loadEnv', () => {
     expect(e.internalSupabaseUrl).toBe('http://127.0.0.1:54321');
   });
 
+  it('AUTH_SESSION_CACHE_SECONDS defaults to 10, accepts 0, refuses negatives and fractions', () => {
+    expect(loadEnv(minimal).AUTH_SESSION_CACHE_SECONDS).toBe(10);
+    expect(
+      loadEnv({ ...minimal, AUTH_SESSION_CACHE_SECONDS: '0' }).AUTH_SESSION_CACHE_SECONDS,
+    ).toBe(0);
+    for (const bad of ['-1', '1.5', 'abc'])
+      expect(() => loadEnv({ ...minimal, AUTH_SESSION_CACHE_SECONDS: bad })).toThrowError(
+        /AUTH_SESSION_CACHE_SECONDS/,
+      );
+  });
+
   it('lists every missing secret in one error', () => {
     expect(() => loadEnv({})).toThrowError(/DATABASE_URL[\s\S]*SUPABASE_SERVICE_ROLE_KEY/);
     expect(() => loadEnv({ DATABASE_URL: '' })).toThrowError(/DATABASE_URL/);

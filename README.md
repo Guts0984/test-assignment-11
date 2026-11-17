@@ -56,6 +56,8 @@ commit (`.github/workflows/ci.yml`: static + unit, database + API, e2e).
 | `packages/shared`  | Zod schemas, status machine, tariff and money rules, time helpers             |
 | `supabase/`        | Config, migrations, RLS, seed _(planned)_                                     |
 
+- Dispatcher board filters (URL-backed): queue by zone, status and search (number, phone, recipient name); couriers by shift and free capacity (`GET /dispatch/board?zone=&status=&q=&shift=&free=`).
+
 ## Development
 
 ```bash
@@ -228,6 +230,12 @@ pnpm --filter @courier/api dev        # or: pnpm build && pnpm --filter @courier
 `src/config/env.ts` parses every variable with Zod: secrets (`DATABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`) have no
 default and stop the boot with one readable error; everything else has a default.
 
+Sign-out is honoured: the API also checks that the token's `session_id` still exists in `auth.sessions` (positive
+answers cached for `AUTH_SESSION_CACHE_SECONDS`, default 10, never negatives; a failed lookup refuses the request).
+Known limit: a signed-out token stops working here within that window, but direct PostgREST/Realtime calls with an
+already-issued token keep working until it expires (at most 1 h; read-only and RLS-scoped), because Supabase services
+never check the session.
+
 ### What the API does and what Supabase does
 
 |                      | `apps/api`                                                                                                                                                                                          | Supabase                                              |
@@ -317,7 +325,8 @@ All in-process, single API instance (documented limit); the key is the TCP peer 
 ### Decisions
 
 - Prices, codes and tokens are generated only on the server; the 6-digit handover code uses `crypto.randomInt`.
-- A delivery's code is shown to the recipient on the tracking page and never sent to couriers or senders.
+- A delivery's code is shown to the recipient on the tracking page and is never sent to couriers. A sender can read it
+  through their own tracking link (it is their recipient's code), so it is not a secret from the sender.
 - `attempt_no` is the number of the current attempt; it grows when a failed delivery is assigned again.
 - The cash a courier is expected to hand in is the sum of `cod_collected_kop` of deliveries attributed to the shift.
   A handover that arrives after the shift was closed is recorded in `cash_adjustments`; the closed figures stay as

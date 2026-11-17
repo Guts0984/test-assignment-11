@@ -1,7 +1,8 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CourierAction } from '@courier/shared';
-import { getSupabase, onBeforeSignOut } from '@/shared/api';
+import { useTranslations } from 'next-intl';
+import { getSupabase, onBeforeSignOut, onSignOutWarning } from '@/shared/api';
 import { createStore, openStore, storeNameFor, type Store } from '../api/store';
 import { networkDeps } from '../api/network';
 import { dismissRejected, enqueue, type PhotoRecord, type SyncState } from '../model/engine';
@@ -14,6 +15,9 @@ const EMPTY: SyncState = { queue: [], photos: [] };
  * it survives reloads and restarts and a shared phone never sends one courier's actions under another's account.
  */
 export function useCourierSync(onSynced?: () => void) {
+  const tw = useTranslations('courier');
+  const warnText = useRef(tw);
+  warnText.current = tw;
   const [store, setStore] = useState<Store | null>(null);
   const [state, setState] = useState<SyncState>(EMPTY);
   const [ready, setReady] = useState(false);
@@ -23,14 +27,17 @@ export function useCourierSync(onSynced?: () => void) {
   const cb = useRef(onSynced);
   cb.current = onSynced;
 
-  // 1. find out who is signed in, open THEIR database
+  useEffect(() => setOnline(navigator.onLine), []);
+
+  // 1. find out who is signed in, open THEIR database. getSession() reads the local session, so this works offline
+  // (getUser() asks the server and would leave the app blank after an offline reload).
   useEffect(() => {
     let cancelled = false;
     void getSupabase()
-      .auth.getUser()
+      .auth.getSession()
       .then(({ data }) => {
-        if (cancelled || !data.user) return;
-        setStore(createStore(() => openStore(storeNameFor(data.user!.id))));
+        if (cancelled || !data.session) return;
+        setStore(createStore(() => openStore(storeNameFor(data.session!.user.id))));
       });
     return () => {
       cancelled = true;
@@ -39,6 +46,18 @@ export function useCourierSync(onSynced?: () => void) {
 
   // 2. the cached delivery list holds recipients' names, phones and addresses: wipe it when this courier signs out
   useEffect(() => (store ? onBeforeSignOut(() => store.deleteMeta('today')) : undefined), [store]);
+
+  // 3. signing out with actions still unsent: tell the courier (they stay on the phone for the next sign-in)
+  useEffect(
+    () =>
+      store
+        ? onSignOutWarning(async () => {
+            const count = (await store.read()).queue.filter((q) => q.status === 'pending').length;
+            return count > 0 ? warnText.current('signOutPending', { count }) : null;
+          })
+        : undefined,
+    [store],
+  );
 
   const reload = useCallback(async () => {
     if (store) setState(await store.read());

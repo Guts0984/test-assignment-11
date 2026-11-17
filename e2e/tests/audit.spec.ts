@@ -4,6 +4,13 @@ import { test, expect, login } from './fixtures';
 
 // Regression tests for the findings of the second audit. Each one reproduces the exact user-visible failure.
 
+/** Signs out; when the app warns about unsent actions, confirms ("Sign out anyway"). */
+async function signOut(page: Page): Promise<void> {
+  await page.getByRole('button', { name: 'Sign out', exact: true }).click();
+  const confirm = page.getByRole('dialog').getByRole('button', { name: 'Sign out anyway' });
+  if (await confirm.isVisible({ timeout: 1500 }).catch(() => false)) await confirm.click();
+}
+
 test.describe('dispatcher: two colleagues, one delivery', () => {
   test('a second dispatcher does not silently override the first one’s assignment', async ({
     world,
@@ -127,7 +134,10 @@ test.describe('sender create form: connection problems', () => {
     await expect(page.getByRole('alert').first()).toBeVisible();
     await page.getByLabel('Weight, kg').fill('2'); // the user changes something and tries again
     await page.getByRole('button', { name: 'Create delivery' }).click();
-    const link = page.getByRole('alert').locator('a[href^="/sender/"]');
+    // the message may be an info status or an alert; the link points to ONE delivery (a uuid), unlike the header nav
+    const link = page.locator(
+      'a[href^="/sender/"]:not([href="/sender/new"]):not([href="/sender/notifications"]):not([href="/sender/settings"])',
+    );
     await expect(link).toBeVisible(); // "your earlier attempt already created it" with a way to open it
     const [n] = await world.sql<
       { n: number }[]
@@ -174,7 +184,8 @@ test.describe('courier on a shared phone', () => {
     await phone.context().setOffline(true);
     await card.getByRole('button', { name: 'Picked up' }).click();
     await expect(phone.getByTestId('waiting')).toHaveText('1 action waiting to be sent');
-    await phone.getByRole('button', { name: 'Sign out' }).click();
+    await signOut(phone); // still offline: the courier is warned about the waiting action, confirms, and is signed out
+    await expect(phone).toHaveURL(/\/login$/);
     await phone.context().setOffline(false);
 
     await login(phone, world.courier2, /\/courier$/); // the next courier signs in on the same phone
@@ -190,7 +201,8 @@ test.describe('courier on a shared phone', () => {
     await expect(phone.getByTestId('delivery').filter({ hasText: d.publicNumber })).toHaveCount(0);
 
     // courier 1 signs back in: their own queue is intact and goes out under their own account
-    await phone.getByRole('button', { name: 'Sign out' }).click();
+    await signOut(phone);
+    await expect(phone).toHaveURL(/\/login$/);
     await login(phone, world.courier, /\/courier$/);
     await expect(phone.getByTestId('waiting')).toHaveText('Everything is sent', {
       timeout: 30_000,

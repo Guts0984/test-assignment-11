@@ -5,15 +5,50 @@ import { appError } from '../domain/errors';
 
 export type AuthUser = { id: string; role: Role; email?: string };
 export type AuthVerifier = { verify(token: string): Promise<AuthUser> };
+export type SessionExists = (sessionId: string) => Promise<boolean>;
+
+const MAX_CACHED_SESSIONS = 20_000;
+
+/**
+ * Remembers POSITIVE answers per session id for `ttlSeconds` (0 = no caching). Negatives are never cached, so a
+ * revoked session stays revoked. Bounded: the oldest entry is dropped first (Map keeps insertion order).
+ */
+export function createSessionCheck(
+  lookup: SessionExists,
+  ttlSeconds: number,
+  opts: { maxEntries?: number; now?: () => number } = {},
+): SessionExists {
+  const max = opts.maxEntries ?? MAX_CACHED_SESSIONS;
+  const now = opts.now ?? Date.now;
+  const ttlMs = ttlSeconds * 1000;
+  const live = new Map<string, number>(); // session id -> expiry (ms)
+  return async (id) => {
+    if (ttlMs <= 0) return lookup(id);
+    const t = now();
+    const until = live.get(id);
+    if (until !== undefined && until > t) return true;
+    live.delete(id);
+    if (!(await lookup(id))) return false;
+    live.delete(id);
+    live.set(id, now() + ttlMs);
+    while (live.size > max) live.delete(live.keys().next().value as string);
+    return true;
+  };
+}
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Verifies Supabase JWTs. The algorithm is pinned per key type (never taken on trust from the token):
  * ES256/RS256 against the project's JWKS, HS256 only when the legacy shared secret is configured.
- * `alg: none` and everything else is refused. The role comes from app_metadata only (user_metadata is user-editable).
+ * `alg: none` and everything else is refused. The token's session must still exist (see below). The role comes from app_metadata only (user_metadata is user-editable).
  */
-export function createAuthVerifier(env: Env, jwksOverride?: JWTVerifyGetKey): AuthVerifier {
+export function createAuthVerifier(
+  env: Env,
+  deps: { sessionExists: SessionExists; jwks?: JWTVerifyGetKey },
+): AuthVerifier {
+  const jwksOverride = deps.jwks;
+  const sessionExists = createSessionCheck(deps.sessionExists, env.AUTH_SESSION_CACHE_SECONDS);
   const jwks =
     jwksOverride ??
     createRemoteJWKSet(new URL(`${env.internalSupabaseUrl}/auth/v1/.well-known/jwks.json`), {
@@ -52,6 +87,17 @@ export function createAuthVerifier(env: Env, jwksOverride?: JWTVerifyGetKey): Au
         if (typeof role !== 'string' || !(ROLES as readonly string[]).includes(role)) {
           throw appError('FORBIDDEN', 'This account has no role');
         }
+        // GoTrue deletes the session row on sign-out; without this check a signed-out token would live until `exp`.
+        // A token with no session_id (e.g. forged with the legacy secret) is refused: a live session is required.
+        const sessionId = (payload as { session_id?: unknown }).session_id;
+        if (typeof sessionId !== 'string' || !UUID.test(sessionId)) throw new Error('no session');
+        let alive: boolean;
+        try {
+          alive = await sessionExists(sessionId.toLowerCase());
+        } catch {
+          alive = false; // fail closed
+        }
+        if (!alive) throw new Error('session ended');
         return {
           id: sub.toLowerCase(),
           role: role as Role,

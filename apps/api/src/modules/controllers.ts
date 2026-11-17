@@ -55,6 +55,7 @@ import {
   assignDelivery,
   board,
   type BoardOrder,
+  type BoardFilters,
   closeShift,
   markReturned,
   report,
@@ -89,8 +90,20 @@ const docBody = (schema: ZodType) => {
   return ApiBody({ schema: js });
 };
 
-/** Only `order` is read; other query keys are ignored for this route. */
-const boardQuerySchema = z.object({ order: z.enum(['oldest', 'newest']).default('oldest') });
+const flag = z.enum(['true', 'false', '1', '0']).transform((v) => v === 'true' || v === '1');
+/** Only these keys are read (order and the optional queue/courier filters); other query keys are ignored. */
+const boardQuerySchema = z.object({
+  order: z.enum(['oldest', 'newest']).default('oldest'),
+  zone: z.enum(['A', 'B', 'C']).optional(),
+  status: z.enum(['created', 'failed_attempt']).optional(),
+  q: z
+    .string()
+    .max(64)
+    .transform((v) => v.trim())
+    .optional(),
+  shift: z.enum(['on', 'off', 'all']).default('all'),
+  free: flag.default(false),
+});
 
 const idParam = zod(uuidSchema);
 const user = (req: AuthedRequest) => req.user!;
@@ -196,8 +209,9 @@ export class DispatchController {
   constructor(@Inject(CTX_TOKEN) private readonly ctx: Ctx) {}
 
   @Get('board')
-  board(@Query(zod(boardQuerySchema)) q: { order: BoardOrder }) {
-    return board(this.ctx, q.order);
+  board(@Query(zod(boardQuerySchema)) q: { order: BoardOrder } & BoardFilters) {
+    const { order, ...filters } = q;
+    return board(this.ctx, order, filters);
   }
 
   @Get('deliveries')
