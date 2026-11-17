@@ -6,3 +6,4 @@ supabase/seed.sql
 test-assignment-11.md
 plan.md
 .claude
+next-env.d.ts

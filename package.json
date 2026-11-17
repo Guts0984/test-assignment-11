@@ -9,7 +9,7 @@
   "scripts": {
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
-    "lint": "eslint . && prettier --check .",
+    "lint": "eslint . && prettier --check . && pnpm --filter @courier/web lint:fsd",
     "format": "prettier --write .",
     "test": "pnpm -r --filter '!@courier/db' --filter '!@courier/api' test && pnpm --filter @courier/api test:unit",
     "supabase": "supabase",

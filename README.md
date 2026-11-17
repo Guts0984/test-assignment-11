@@ -334,6 +334,41 @@ while an earlier notification fails, the 30 s … 24 h schedule over 16 attempts
 works → everything arrives in order", same id on retries, parallel workers, the full three-failures flow, manual resend,
 16 forbidden URLs, DNS-rebinding style resolution, redirects, the background loop, no secrets in payloads.
 
+## Web (`apps/web`)
+
+Next.js 15 (App Router), React 19, `@supabase/ssr`, TanStack Query, React Hook Form, Tailwind 4, next-intl.
+
+**Architecture: Feature-Sliced Design.** Next's router lives in the root `app/` folder and is deliberately thin (one
+line per route); the layers live in `src/`: `app` (providers, styles) → `pages` → `widgets` → `features` → `entities` →
+`shared`. Every slice has segments (`ui`, `model`, `api`) and a public `index.ts`; `steiger` checks the rules (no
+upward imports, no cross-slice imports on the same layer, no public-API sidestepping) and runs in `pnpm lint`. An empty
+root `pages/` folder keeps Next from treating `src/pages` as the old Pages Router. No classes anywhere (lint rule).
+
+| Area       | Routes                                                                                                                                                                                                                                                            |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| everyone   | `/login`; `/` redirects to the role's home                                                                                                                                                                                                                        |
+| sender     | `/sender` (list; filters, search, paging live in the URL), `/sender/new` (live server price), `/sender/:id` (card, history, photos, cancel), `/sender/notifications` (log, attempts, resend), `/sender/settings` (webhook URL and secret)                         |
+| dispatcher | `/dispatcher` (board: queue per zone, courier load `5/8`, shift state, blocked handovers; assign dialog, close-shift dialog with expected cash and discrepancy), `/dispatcher/deliveries`, `/dispatcher/deliveries/:id`, `/dispatcher/report` (period in the URL) |
+| recipient  | `/track/:token` (no login; live)                                                                                                                                                                                                                                  |
+
+- **Live updates:** the board, lists and cards subscribe to Supabase Realtime (`postgres_changes`, filtered by RLS for the
+  signed-in user) and refetch; the tracking page uses an anonymous Broadcast channel whose payload is built by a database
+  trigger. One client per subscription (supabase-js gives a client's second channel the anon key).
+- **Locales `uk` / `en`**, chosen by a cookie (no prefix in URLs). Money: `1 234,50 ₴` (uk) and `₴1,234.50` (en). Dates use
+  `Europe/Kyiv`. ICU plurals (`1 доставку`, `2 доставки`, `5 доставок`, `21 доставку`) are tested against the CLDR rules.
+- **Forms:** every field shows its own message next to it (`aria-describedby`, `role="alert"`) and the first invalid field is
+  focused; server `details.fields` are mapped back onto the same fields; double submits are blocked; the create form keeps
+  one `Idempotency-Key` per form, so a retry after a lost response cannot create a second delivery.
+- **Keyboard:** native `<dialog>` (focus trap, Esc, focus return), real buttons and labels, a skip link, visible focus.
+- **Security:** only the anon key is in the browser; a test scans the production bundle for the service-role key and other
+  secrets. Middleware keeps each role in its own area (convenience only; the API and RLS are the real protection). All data
+  goes through the API with the user's JWT; browsers never write to the database.
+
+Tests (`pnpm --filter @courier/web test`, jsdom): message parity and placeholders, every used key exists, Ukrainian/English
+plurals, money and weight parsing with properties, URL ↔ filter round trips, the create form (per-field errors and focus,
+live quote, one request on double click, stable idempotency key, server field errors), login form incl. keyboard-only,
+axe accessibility checks, and the bundle secret scan.
+
 ## Money, tariff and rounding
 
 Money is always an integer number of kopecks.

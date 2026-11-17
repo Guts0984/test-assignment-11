@@ -14,7 +14,14 @@ const noClasses = [
 
 export default tseslint.config(
   {
-    ignores: ['**/dist/**', '**/.next/**', '**/node_modules/**', '**/coverage/**', 'supabase/**'],
+    ignores: [
+      '**/next-env.d.ts',
+      '**/dist/**',
+      '**/.next/**',
+      '**/node_modules/**',
+      '**/coverage/**',
+      'supabase/**',
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

@@ -1,0 +1,44 @@
+{
+  "name": "@courier/web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 3000",
+    "build": "next build",
+    "start": "next start -p 3000",
+    "typecheck": "tsc --noEmit",
+    "lint:fsd": "steiger ./src",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@courier/shared": "workspace:*",
+    "@hookform/resolvers": "^5.2.0",
+    "@supabase/ssr": "^0.7.0",
+    "@supabase/supabase-js": "^2.58.0",
+    "@tanstack/react-query": "^5.90.0",
+    "idb": "^8.0.0",
+    "next": "^15.5.0",
+    "next-intl": "^4.3.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-hook-form": "^7.62.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@feature-sliced/steiger-plugin": "^0.5.0",
+    "@tailwindcss/postcss": "^4.1.0",
+    "@testing-library/jest-dom": "^6.8.0",
+    "@testing-library/react": "^16.3.0",
+    "@testing-library/user-event": "^14.6.0",
+    "@types/node": "^22",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "axe-core": "^4.10.0",
+    "fast-check": "^4.10.2",
+    "intl-messageformat": "^10.7.18",
+    "jsdom": "^26.1.0",
+    "steiger": "^0.5.0",
+    "tailwindcss": "^4.1.0",
+    "vitest": "^3.2.0"
+  }
+}

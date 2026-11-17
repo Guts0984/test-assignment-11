@@ -1,0 +1,18 @@
+@import 'tailwindcss';
+
+:root {
+  color-scheme: light;
+}
+body {
+  background: #f8fafc;
+  color: #0f172a;
+}
+dialog::backdrop {
+  background: rgb(0 0 0 / 0.4);
+}
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition: none !important;
+  }
+}
