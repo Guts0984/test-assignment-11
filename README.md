@@ -369,6 +369,33 @@ plurals, money and weight parsing with properties, URL ↔ filter round trips, t
 live quote, one request on double click, stable idempotency key, server field errors), login form incl. keyboard-only,
 axe accessibility checks, and the bundle secret scan.
 
+## Courier app (`/courier`, offline-first PWA)
+
+Built for a phone at 360 px, in `apps/web` (FSD slices `courier-sync`, `courier-actions`, widget `courier-app`).
+
+- **Installable and opens without a network:** `public/sw.js` caches the content-hashed assets and the last `/courier`
+  page (network-first for the page). API calls are never cached: the courier's work lives in IndexedDB instead.
+- **Device queue (IndexedDB, `idb`):** every tap ("Picked up", "Handed over", "Not delivered") becomes an action with a
+  `clientActionId` made on the device and a local order number. The photo is stored next to it as raw bytes (downscaled
+  to ≤1600 px) in **the same transaction**, so an action and its photo are saved together or not at all. The queue,
+  rejected actions and the last list of deliveries survive reloads and phone restarts (`navigator.storage.persist()` is requested).
+- **Sync (pure engine + thin IO shell):** photos are uploaded first (`PUT /courier/photos/:id`, idempotent), then the actions
+  go out in order in batches of up to 100. Triggers: app start, the `online` event, a tap, every 8 s while something is waiting.
+  A lost response is harmless: the retry returns the stored outcomes, nothing is applied twice and no second photo is stored.
+  An action never overtakes an earlier one that still waits for its photo.
+- **What the courier sees:** a connection badge, "N actions waiting to be sent" (also per delivery), what the list looks
+  like with the waiting actions applied (a queued pickup already shows "picked up"), a **Taken away from you** panel
+  (reassigned / timed out / cancelled / delivered by someone else) and a **rejected actions** panel with the reason in
+  the user's language. A rejection stays until dismissed; it never disappears silently. A photo the server refuses for
+  good (wrong type, not your delivery) turns its action into such a rejection instead of blocking the queue.
+- The handover code is typed by the courier and checked by the server, so a wrong code surfaces as a rejection after
+  sync (see the conflict table above).
+
+Tests: the sync engine (13 rules + a property test with 300 random interleavings of offline work, lost responses,
+duplicate sends and retries: every action ends applied or rejected exactly once, none lost) and the real IndexedDB layer
+(`fake-indexeddb`): reload persistence, atomic writes, 20 concurrent writers, actions added during a sync, photo refusals,
+230 actions in 3 batches. The browser behaviour is covered by the Playwright scenarios.
+
 ## Money, tariff and rounding
 
 Money is always an integer number of kopecks.

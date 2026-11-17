@@ -1,2 +1,2 @@
 export * from './config';
-export { useErrorText } from './use-error-text';
+export { useErrorText, useCodeText } from './use-error-text';

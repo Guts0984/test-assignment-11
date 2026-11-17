@@ -34,6 +34,7 @@
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "axe-core": "^4.10.0",
+    "fake-indexeddb": "^6.2.8",
     "fast-check": "^4.10.2",
     "intl-messageformat": "^10.7.18",
     "jsdom": "^26.1.0",

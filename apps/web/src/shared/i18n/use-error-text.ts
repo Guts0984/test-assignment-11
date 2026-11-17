@@ -55,3 +55,18 @@ const ERROR_KEYS: Record<string, true> = Object.fromEntries(
     'NETWORK',
   ].map((k) => [k, true]),
 );
+
+/** Same wording as `useErrorText`, for a bare error code (e.g. a rejection stored on the device). */
+export function useCodeText() {
+  const raw = useTranslations('errors');
+  const t = raw as unknown as (key: string, values?: Record<string, string | number>) => string;
+  return (code: string, details?: Record<string, unknown>): string =>
+    code in ERROR_KEYS
+      ? t(code, {
+          active: Number(details?.active ?? 0),
+          limit: Number(details?.limit ?? 0),
+          attemptsLeft: Number(details?.attemptsLeft ?? 0),
+          date: '',
+        })
+      : t('INTERNAL');
+}
