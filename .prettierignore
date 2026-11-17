@@ -1,0 +1,8 @@
+node_modules
+dist
+.next
+pnpm-lock.yaml
+supabase/seed.sql
+test-assignment-11.md
+plan.md
+.claude

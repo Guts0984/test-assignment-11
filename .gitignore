@@ -1,0 +1,12 @@
+node_modules
+dist
+.next
+.env
+.turbo
+coverage
+*.tsbuildinfo
+playwright-report
+test-results
+.DS_Store
+supabase/.temp
+supabase/.branches
