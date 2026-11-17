@@ -65,7 +65,9 @@ export type Report = {
   };
 };
 
-export const fetchBoard = () => api<Board>('/dispatch/board');
+export type BoardOrder = 'oldest' | 'newest';
+export const fetchBoard = (order: BoardOrder = 'oldest') =>
+  api<Board>(`/dispatch/board?order=${order}`);
 export const fetchShift = (courierId: string) =>
   api<ShiftSummary>(`/dispatch/couriers/${courierId}/shift`);
 export const closeShift = (courierId: string, handedCashKop: number) =>

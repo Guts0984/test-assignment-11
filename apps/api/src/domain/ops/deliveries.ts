@@ -43,6 +43,7 @@ export async function createDelivery(
         throw appError(
           'IDEMPOTENCY_KEY_REUSED',
           'This Idempotency-Key was already used with a different request body',
+          { deliveryId: existing.deliveryId },
         );
       }
       const [row] = await tx.select().from(d).where(eq(d.id, existing.deliveryId));

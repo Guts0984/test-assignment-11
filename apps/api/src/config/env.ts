@@ -41,12 +41,9 @@ const schema = z.object({
   MAX_INFLIGHT_PER_IP: int(64, 1),
   MAX_INFLIGHT_GLOBAL: int(256, 1),
 
+  // Business limits (8 active deliveries, 45 minutes, 5 wrong codes, 3 attempts, batches of 100) are NOT settings:
+  // the database enforces them, so they live in @courier/shared LIMITS and cannot drift from it.
   // business rules
-  MAX_ACTIVE_DELIVERIES_PER_COURIER: int(8, 1),
-  PICKUP_TIMEOUT_MINUTES: int(45, 1),
-  HANDOVER_MAX_WRONG_CODES: int(5, 1),
-  MAX_DELIVERY_ATTEMPTS: int(3, 1),
-  MAX_BATCH_ACTIONS: int(100, 1),
   BUSINESS_TIMEZONE: z.string().default('Europe/Kyiv'),
 
   // webhooks
@@ -55,7 +52,7 @@ const schema = z.object({
   WEBHOOK_TIMEOUT_MS: int(10_000, 100),
   WEBHOOK_BACKOFF_BASE_SECONDS: int(30, 1),
   WEBHOOK_BACKOFF_MAX_SECONDS: int(86_400, 1),
-  WEBHOOK_ALLOWED_PRIVATE_HOSTS: z.string().default('sender-stub,localhost,127.0.0.1'),
+  WEBHOOK_ALLOWED_PRIVATE_HOSTS: z.string().default('sender-stub'),
 });
 
 export type Env = Readonly<z.infer<typeof schema>> & {

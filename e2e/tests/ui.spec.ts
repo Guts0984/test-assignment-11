@@ -358,6 +358,52 @@ test.describe('recipient tracking page', () => {
   });
 });
 
+test.describe('tracking page: forged live messages', () => {
+  test('someone who knows the channel name cannot make the page show fake data', async ({
+    world,
+    open,
+  }) => {
+    const d = await createDelivery(world.sql, { senderId: world.sender.id, codKop: 5000 });
+    const [secret] = await world.sql<
+      { tracking_channel: string }[]
+    >`select tracking_channel from public.delivery_secrets where delivery_id = ${d.id}`;
+    const page = await open();
+    await page.goto(`/track/${d.trackingToken}`);
+    await expect(page.getByTestId('tr-status')).toHaveText('Created');
+    await page.waitForTimeout(1500); // the page is subscribed
+    const env = (await import('@courier/db/testing')).testEnv();
+    const res = await fetch(`${env.supabaseUrl}/realtime/v1/api/broadcast`, {
+      method: 'POST',
+      headers: { apikey: env.anonKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages: [
+          {
+            topic: `tracking:${secret!.tracking_channel}`,
+            event: 'tracking',
+            private: false,
+            payload: {
+              number: d.publicNumber,
+              status: 'delivered',
+              attemptNo: 1,
+              courierName: 'Forged X.',
+              amountDueKop: 1,
+              updatedAt: new Date().toISOString(),
+            },
+          },
+        ],
+      }),
+    });
+    expect(res.status).toBeLessThan(300); // the forged message really was sent
+    await page.waitForTimeout(2500);
+    await expect(page.getByTestId('tr-status')).toHaveText('Created');
+    await expect(page.getByTestId('tr-courier')).toHaveText('Not assigned yet');
+    await expect(page.getByTestId('tr-amount')).toHaveText('₴50.00');
+    // a genuine change still arrives (the page asks the API when told something changed)
+    await assignDelivery(world.sql, d.id, world.courier.id);
+    await expect(page.getByTestId('tr-status')).toHaveText('Assigned');
+  });
+});
+
 test.describe('courier phone (360 px)', () => {
   test('a refused handover stays visible, in the user’s language, until dismissed — also after a reload', async ({
     world,

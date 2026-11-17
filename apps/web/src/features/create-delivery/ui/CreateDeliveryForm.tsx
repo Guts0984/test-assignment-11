@@ -1,10 +1,11 @@
 'use client';
-import { useRef, useState } from 'react';
+import { useRef, useState, type ReactNode } from 'react';
 import { useForm } from 'react-hook-form';
 import { useMutation, useQuery, keepPreviousData, useQueryClient } from '@tanstack/react-query';
 import { useLocale, useTranslations } from 'next-intl';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { api, isApiError } from '@/shared/api';
+import { api, isApiError, makeApiError } from '@/shared/api';
 import { useErrorText } from '@/shared/i18n';
 import { useDebounced } from '@/shared/lib';
 import { formatMoney, type AppLocale } from '@/shared/lib';
@@ -21,6 +22,8 @@ import {
 } from '../model/model';
 import { parseMoneyToKop } from '@/shared/lib';
 
+const REQUEST_TIMEOUT_MS = 15_000;
+
 export function CreateDeliveryForm() {
   const t = useTranslations('create');
   const tf = useTranslations('form');
@@ -28,7 +31,7 @@ export function CreateDeliveryForm() {
   const router = useRouter();
   const qc = useQueryClient();
   const errorText = useErrorText();
-  const [formError, setFormError] = useState<string | null>(null);
+  const [formError, setFormError] = useState<ReactNode>(null);
   // one key per form: pressing "Create" again after a lost response returns the same delivery instead of a second one
   const keyRef = useRef(`web-${crypto.randomUUID()}`);
 
@@ -76,6 +79,7 @@ export function CreateDeliveryForm() {
         method: 'POST',
         body,
         headers: { 'Idempotency-Key': keyRef.current },
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS), // an aborted request surfaces as the NETWORK error
       }),
     onSuccess: (d) => {
       void qc.invalidateQueries({ queryKey: deliveryKeys.all });
@@ -93,6 +97,20 @@ export function CreateDeliveryForm() {
         }
         if (any) return;
       }
+      // the response of an earlier attempt was lost, the server did create the delivery: point the user to it
+      const id =
+        isApiError(e) && e.code === 'IDEMPOTENCY_KEY_REUSED' ? e.details?.deliveryId : null;
+      if (typeof id === 'string') {
+        setFormError(
+          <>
+            {t('alreadyCreated')}{' '}
+            <Link className="font-medium underline" href={`/sender/${id}`}>
+              {t('openCreated')}
+            </Link>
+          </>,
+        );
+        return;
+      }
       setFormError(errorText(e));
     },
   });
@@ -104,6 +122,10 @@ export function CreateDeliveryForm() {
       for (const i of r.issues) setError(i.field, { message: msg(i.field, i.kind) });
       const first = FIELD_ORDER.find((f) => r.issues.some((i) => i.field === f));
       if (first) document.getElementById(`f-${first}`)?.focus();
+      return;
+    }
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      setFormError(errorText(makeApiError({ status: 0, code: 'NETWORK', message: 'offline' })));
       return;
     }
     create.mutate(r.body);
@@ -120,7 +142,7 @@ export function CreateDeliveryForm() {
     >
       {formError && (
         <div className="md:col-span-2">
-          <Alert>{formError}</Alert>
+          <Alert tone={typeof formError === 'string' ? 'error' : 'info'}>{formError}</Alert>
         </div>
       )}
       <fieldset className="grid gap-3 md:col-span-2 md:grid-cols-2">

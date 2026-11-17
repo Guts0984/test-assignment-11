@@ -78,11 +78,12 @@ describe('invariant 1: one delivery, one creator (Idempotency-Key)', () => {
   it('the same key with a different body is refused with 409, and creates nothing', async () => {
     const a = await makeActors(h.sql);
     const key = idemKey();
-    await call(h, 'POST', '/deliveries', {
+    const first = await call<{ id: string }>(h, 'POST', '/deliveries', {
       token: a.sender.accessToken,
       body: validBody(),
       headers: { 'Idempotency-Key': key },
     });
+    expect(first.status).toBe(201);
     for (const change of [
       { weightG: 1501 },
       { zone: 'B' },
@@ -90,14 +91,30 @@ describe('invariant 1: one delivery, one creator (Idempotency-Key)', () => {
       { recipientName: 'Someone Else' },
       { address: { city: 'Lviv', street: 'x', house: '1' } },
     ]) {
-      const r = await call<{ error: { code: string } }>(h, 'POST', '/deliveries', {
-        token: a.sender.accessToken,
-        body: validBody(change),
-        headers: { 'Idempotency-Key': key },
-      });
+      const r = await call<{ error: { code: string; details?: { deliveryId?: string } } }>(
+        h,
+        'POST',
+        '/deliveries',
+        {
+          token: a.sender.accessToken,
+          body: validBody(change),
+          headers: { 'Idempotency-Key': key },
+        },
+      );
       expect(r.status, JSON.stringify(change)).toBe(409);
       expect(r.body.error.code).toBe('IDEMPOTENCY_KEY_REUSED');
+      // the owner is told which delivery the earlier attempt created
+      expect(r.body.error.details?.deliveryId).toBe(first.body.id);
     }
+    // another sender with the same key and a different body gets their own delivery and never sees our id
+    const other = await call<{ id: string }>(h, 'POST', '/deliveries', {
+      token: a.sender2.accessToken,
+      body: validBody({ weightG: 1501 }),
+      headers: { 'Idempotency-Key': key },
+    });
+    expect(other.status).toBe(201);
+    expect(other.body.id).not.toBe(first.body.id);
+    expect(JSON.stringify(other.body)).not.toContain(first.body.id);
     const [n] = await h.sql<
       { n: number }[]
     >`select count(*)::int n from public.deliveries where sender_id = ${a.sender.user.id}`;
@@ -624,17 +641,79 @@ describe('invariant 7: a courier action is applied once (acceptance 11)', () => 
     expect(r2.body.results[0]!.result).toBe('applied');
   });
 
-  it('a duplicated clientActionId inside one batch is a 400 (nothing applied)', async () => {
+  it('one invalid action is rejected on its own: the valid handover in the same batch is still applied', async () => {
+    const a = await makeActors(h.sql);
+    const { d, code, photoId } = await handoverReady(h, a, { codKop: 5_000 });
+    const tooMuch = { ...act.deliver(d.id, code, 10_000_100, photoId) }; // above the 100 000 ₴ limit
+    const noType = {
+      clientActionId: randomUUID(),
+      deliveryId: d.id,
+      deviceTime: new Date().toISOString(),
+      type: 'teleport',
+    };
+    const garbage = 'not an object';
+    const good = act.deliver(d.id, code, 5_000, photoId);
+    const r = await call<{
+      results: {
+        clientActionId: string | null;
+        index?: number;
+        result: string;
+        code?: string;
+        details?: { fields: Record<string, string> };
+      }[];
+    }>(h, 'POST', '/courier/actions', {
+      token: a.courier.accessToken,
+      body: { actions: [tooMuch, noType, garbage, good] },
+    });
+    expect(r.status).toBe(200);
+    expect(r.body.results.map((x) => x.result)).toEqual([
+      'rejected',
+      'rejected',
+      'rejected',
+      'applied',
+    ]);
+    expect(r.body.results[0]).toMatchObject({
+      clientActionId: tooMuch.clientActionId,
+      index: 0,
+      code: 'VALIDATION_FAILED',
+    });
+    expect(Object.keys(r.body.results[0]!.details!.fields)).toContain('codCollectedKop');
+    expect(r.body.results[1]).toMatchObject({
+      clientActionId: noType.clientActionId,
+      index: 1,
+      code: 'VALIDATION_FAILED',
+    });
+    expect(r.body.results[2]).toMatchObject({
+      clientActionId: null,
+      index: 2,
+      code: 'VALIDATION_FAILED',
+    });
+    expect(await statusOf(h.sql, d.id)).toBe('delivered');
+    // the envelope itself is still validated as a whole
+    for (const body of [
+      {},
+      { actions: [] },
+      { actions: 'x' },
+      { actions: Array.from({ length: 101 }, () => ({})) },
+      { actions: [{}], extra: 1 },
+    ]) {
+      expect(
+        (await call(h, 'POST', '/courier/actions', { token: a.courier.accessToken, body })).status,
+      ).toBe(400);
+    }
+  });
+
+  it('the same clientActionId twice in one batch is applied once; the second answer is the stored one', async () => {
     const a = await makeActors(h.sql);
     const d = await createViaApi(h, a.sender.accessToken);
     await assign(h, a.dispatcher.accessToken, d.id, a.courier.user.id);
     const p = act.pickup(d.id);
-    const r = await call(h, 'POST', '/courier/actions', {
-      token: a.courier.accessToken,
-      body: { actions: [p, { ...p }] },
-    });
-    expect(r.status).toBe(400);
-    expect(await statusOf(h.sql, d.id)).toBe('assigned');
+    const r = await sendActions(h, a.courier.accessToken, [p, { ...p }]);
+    expect(r.body.results.map((x) => [x.result, x.duplicate ?? false])).toEqual([
+      ['applied', false],
+      ['applied', true],
+    ]);
+    expect(await statusOf(h.sql, d.id)).toBe('picked_up');
   });
 });
 
@@ -921,6 +1000,55 @@ describe('invariant 11: cash adds up (acceptance 14)', () => {
       await h.sql`select amount_kop from public.cash_adjustments where delivery_id = ${d.id}`;
     expect(adj.map((x) => Number(x.amount_kop))).toEqual([40_000]);
   });
+
+  it(
+    'cash that was collected offline and synced after the shift closed counts towards that shift in the report',
+    async () => {
+      const today = new Date().toISOString().slice(0, 10);
+      type Rep = {
+        cashDiscrepancies: {
+          items: {
+            courierId: string;
+            expectedKop: number;
+            handedKop: number;
+            discrepancyKop: number;
+          }[];
+        };
+      };
+      for (const [handed, expectedItem] of [
+        [50_000, undefined],
+        [0, { expectedKop: 50_000, handedKop: 0, discrepancyKop: -50_000 }],
+      ] as const) {
+        const a = await makeActors(h.sql);
+        const d = await createViaApi(h, a.sender.accessToken, { codKop: 50_000 });
+        await assign(h, a.dispatcher.accessToken, d.id, a.courier.user.id);
+        await assign(h, a.dispatcher.accessToken, d.id, a.courier2.user.id, true); // the courier holds nothing, so the shift can close
+        expect(
+          (
+            await call(h, 'POST', `/dispatch/couriers/${a.courier.user.id}/shift/close`, {
+              token: a.dispatcher.accessToken,
+              body: { handedCashKop: handed },
+            })
+          ).status,
+        ).toBe(200);
+        const photo = await uploadPhotoVia(h, a.courier.accessToken, d.id, 'handover');
+        const r = await sendActions(h, a.courier.accessToken, [
+          act.deliver(d.id, await codeOf(h.sql, d.id), 50_000, photo.photoId),
+        ]);
+        expect(r.body.results[0]!.result).toBe('applied');
+        const rep = await call<Rep>(h, 'GET', `/dispatch/report?from=${today}&to=${today}`, {
+          token: a.dispatcher.accessToken,
+        });
+        const item = rep.body.cashDiscrepancies.items.find(
+          (i) => i.courierId === a.courier.user.id,
+        );
+        // an honest courier who hands in the 500 ₴ is NOT reported; one who hands in nothing is short by exactly 500 ₴
+        if (expectedItem) expect(item).toMatchObject(expectedItem);
+        else expect(item).toBeUndefined();
+      }
+    },
+    T,
+  );
 
   it('closing a shift while a late handover arrives: collected, expected and adjustments always reconcile (20 races)', async () => {
     for (let i = 0; i < 20; i++) {

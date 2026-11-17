@@ -22,7 +22,13 @@ export function AssignDialog({
   const errorText = useErrorText();
   const qc = useQueryClient();
   const [courierId, setCourierId] = useState('');
-  const reassign = delivery?.status === 'assigned';
+  // The status the dialog was OPENED with. A live update (another dispatcher assigned it meanwhile) must not
+  // flip us into "reassign": the API's ALREADY_ASSIGNED refusal is the guard and has to reach the user.
+  const [opened, setOpened] = useState<{ id: string; status: string } | null>(null);
+  if ((delivery?.id ?? null) !== (opened?.id ?? null)) {
+    setOpened(delivery ? { id: delivery.id, status: delivery.status } : null);
+  }
+  const reassign = opened?.status === 'assigned';
   const m = useMutation({
     mutationFn: () => assign(delivery!.id, courierId, reassign),
     onSuccess: () => {

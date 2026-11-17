@@ -29,6 +29,18 @@ const h = useHarness({
 });
 let stub: RunningStub;
 beforeAll(async () => {
+  // The worker tests assume they are the only worker on this database. A running `docker compose` API polls the same
+  // notifications table and would take (and fail) the test notifications first.
+  const other = await fetch(`http://127.0.0.1:${process.env.API_PORT ?? 4000}/health`, {
+    signal: AbortSignal.timeout(1000),
+  }).then(
+    (r) => r.ok,
+    () => false,
+  );
+  if (other)
+    throw new Error(
+      'Another API is running (docker compose?). Its webhook worker shares this database: run "docker compose stop api" before the webhook tests.',
+    );
   stub = await createStub({ secret: SECRET });
 });
 afterAll(async () => {
@@ -263,7 +275,9 @@ describe('invariant 10: sender notifications', () => {
       const ds = await Promise.all(
         Array.from({ length: 12 }, () => createViaApi(h, a.sender.accessToken)),
       );
-      await Promise.all([tickFor(a), tickFor(a), tickFor(a), tickFor(a)]);
+      // a round takes at most 3 notifications per sender (fair share), so it takes a few rounds, each run by 4 workers at once
+      for (let i = 0; i < 6; i++)
+        await Promise.all([tickFor(a), tickFor(a), tickFor(a), tickFor(a)]);
       for (const d of ds) expect(mine(d.id), d.id).toHaveLength(1);
       const rows =
         await h.sql`select attempts from public.notifications where delivery_id = any(${ds.map((d) => d.id)})`;
@@ -422,30 +436,100 @@ describe('notification log and manual resend', () => {
   );
 
   it(
-    'resending while the receiver is down reports the failure and does not break ordering',
+    'a pending notification can only be resent when it is the head of its queue (ordering cannot be bypassed)',
     async () => {
       const a = await newSender();
       stub.state.mode = 'error';
       const d = await createViaApi(h, a.sender.accessToken);
       await assign(h, a.dispatcher.accessToken, d.id, a.courier.user.id);
-      const second = (await notes(d.id))[1]!;
+      const [first, second] = await notes(d.id);
+      const before = mine(d.id).length;
+      // #2 ("assigned") while #1 ("created") is still pending: refused, and nothing is sent to the receiver
+      const blocked = await call<{ error: { code: string } }>(
+        h,
+        'POST',
+        `/notifications/${second!.id}/resend`,
+        { token: a.sender.accessToken },
+      );
+      expect(blocked.status).toBe(409);
+      expect(blocked.body.error.code).toBe('CONFLICT');
+      expect(mine(d.id)).toHaveLength(before);
+      // #1 is the head: resending it is fine, also while the receiver fails
       const r = await call<{ attempt: { ok: boolean; httpStatus: number } }>(
         h,
         'POST',
-        `/notifications/${second.id}/resend`,
+        `/notifications/${first!.id}/resend`,
         { token: a.sender.accessToken },
       );
       expect(r.body.attempt).toMatchObject({ ok: false, httpStatus: 500 });
-      // a successful manual send of #2 must not mark it delivered while #1 is still pending
       stub.state.mode = 'ok';
-      const r2 = await call<{ notification: { status: string } }>(
+      const ok = await call<{ notification: { status: string } }>(
         h,
         'POST',
-        `/notifications/${second.id}/resend`,
+        `/notifications/${first!.id}/resend`,
         { token: a.sender.accessToken },
       );
-      expect(r2.body.notification.status).toBe('pending');
-      expect((await notes(d.id)).map((n) => n.status)).toEqual(['pending', 'pending']);
+      expect(ok.body.notification.status).toBe('delivered');
+      // now #2 is the head
+      const next = await call<{ notification: { status: string } }>(
+        h,
+        'POST',
+        `/notifications/${second!.id}/resend`,
+        { token: a.sender.accessToken },
+      );
+      expect(next.status).toBe(200);
+      expect(next.body.notification.status).toBe('delivered');
+      expect(mine(d.id).map((x) => (x.body as { event: string }).event)).toEqual([
+        'created',
+        'created',
+        'assigned',
+      ]); // 500, then 200, then #2
+    },
+    T,
+  );
+
+  it(
+    'a dead receiver for one sender does not delay another sender, and never holds a database connection',
+    async () => {
+      const dead = await newSender();
+      const healthy = await newSender();
+      const blackHole = await createStub({ secret: SECRET });
+      blackHole.state.mode = 'hang'; // accepts the request and never answers: each attempt lasts the full 600 ms timeout
+      try {
+        await h.sql`update public.sender_webhooks set url = ${`${blackHole.url}/hook`} where sender_id = ${dead.sender.user.id}`;
+        for (let i = 0; i < 24; i++) await createViaApi(h, dead.sender.accessToken); // 24 due notifications of the dead sender
+        const d = await createViaApi(h, healthy.sender.accessToken);
+        stub.state.mode = 'ok';
+
+        const idle: number[] = [];
+        const poll = setInterval(async () => {
+          const [r] = await h.sql<
+            { n: number }[]
+          >`select count(*)::int n from pg_stat_activity where state = 'idle in transaction' and datname = current_database()`;
+          idle.push(r!.n);
+        }, 50);
+        // ONE unfiltered round, exactly what the background loop does
+        await h.api.worker.tick();
+        clearInterval(poll);
+
+        const [mineRow] = await notes(d.id);
+        expect(mineRow!.status, 'the healthy sender is served in the first round').toBe(
+          'delivered',
+        );
+        const deadTried = await h.sql<
+          { n: number }[]
+        >`select count(*)::int n from public.notifications where sender_id = ${dead.sender.user.id} and attempts > 0`;
+        expect(
+          deadTried[0]!.n,
+          'the dead sender gets only its fair share per round',
+        ).toBeLessThanOrEqual(3);
+        expect(
+          Math.max(0, ...idle),
+          'no connection waits "idle in transaction" for the receiver',
+        ).toBe(0);
+      } finally {
+        await blackHole.close();
+      }
     },
     T,
   );

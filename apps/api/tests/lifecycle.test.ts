@@ -352,16 +352,22 @@ describe('acceptance 5: three failed attempts → returning → returned', () =>
       }
       const x = await pickedUp(h, a);
       const photo = await uploadPhotoVia(h, a.courier.accessToken, x.d.id, 'failed');
-      const bad = await call(h, 'POST', '/courier/actions', {
-        token: a.courier.accessToken,
-        body: { actions: [act.fail(x.d.id, photo.photoId, 'other')] },
-      });
-      expect(bad.status).toBe(400);
-      const unknown = await call(h, 'POST', '/courier/actions', {
-        token: a.courier.accessToken,
-        body: { actions: [act.fail(x.d.id, photo.photoId, 'bored')] },
-      });
-      expect(unknown.status).toBe(400);
+      // an invalid action is rejected on its own, with the field named; the delivery is untouched
+      for (const [reason, field] of [
+        ['other', 'note'],
+        ['bored', 'reason'],
+      ] as const) {
+        const bad = await sendActions(h, a.courier.accessToken, [
+          act.fail(x.d.id, photo.photoId, reason),
+        ]);
+        expect(bad.status).toBe(200);
+        expect(bad.body.results[0]).toMatchObject({
+          result: 'rejected',
+          code: 'VALIDATION_FAILED',
+        });
+        expect(Object.keys(bad.body.results[0]!.details!.fields as object)).toContain(field);
+      }
+      expect(await statusOf(h.sql, x.d.id)).toBe('picked_up');
     },
     T,
   );
@@ -899,7 +905,44 @@ describe('dispatcher board and report', () => {
     void d1;
   });
 
-  it('the report equals the database for the same period: delivered, mean time, failures by reason, cash discrepancies', async () => {
+  it('board order=newest lists the newest waiting deliveries first; the default is oldest first; a bad order is 400', async () => {
+    const a = await makeActors(h.sql);
+    const fresh: string[] = [];
+    for (let i = 0; i < 3; i++) fresh.push((await createViaApi(h, a.sender.accessToken)).id);
+    type B = { zones: { zone: string; items: { id: string; createdAt: string }[] }[] };
+    const get = (q: string) =>
+      call<B>(h, 'GET', `/dispatch/board${q}`, { token: a.dispatcher.accessToken });
+    const newest = await get('?order=newest');
+    expect(newest.status).toBe(200);
+    const items = newest.body.zones.find((z) => z.zone === 'A')!.items;
+    // newest first: the three fresh ones lead, most recent first
+    expect(items.slice(0, 3).map((i) => i.id)).toEqual([...fresh].reverse());
+    const times = items.map((i) => Date.parse(i.createdAt));
+    expect(times).toEqual([...times].sort((x, y) => y - x));
+    const oldest = await get('?order=oldest');
+    const def = await get('');
+    expect(def.status).toBe(200);
+    expect(def.body.zones.find((z) => z.zone === 'A')!.items.map((i) => i.id)).toEqual(
+      oldest.body.zones.find((z) => z.zone === 'A')!.items.map((i) => i.id),
+    );
+    const dTimes = def.body.zones
+      .find((z) => z.zone === 'A')!
+      .items.map((i) => Date.parse(i.createdAt));
+    expect(dTimes).toEqual([...dTimes].sort((x, y) => x - y));
+    // with the default order the fresh deliveries are not at the head (the queue holds older ones)
+    const [waiting] = await h.sql<
+      { n: number }[]
+    >`select count(*)::int n from public.deliveries where zone = 'A' and status in ('created','failed_attempt')`;
+    if (waiting!.n > 25 + 3)
+      expect(
+        def.body.zones.find((z) => z.zone === 'A')!.items.some((i) => fresh.includes(i.id)),
+      ).toBe(false);
+    const bad = await get('?order=sideways');
+    expect(bad.status).toBe(400);
+    expect((bad.body as unknown as Err).error.code).toBe('VALIDATION_FAILED');
+  });
+
+  it('the report equals the database for the same period: delivered,mean time, failures by reason, cash discrepancies', async () => {
     const a = await makeActors(h.sql);
     // seed-independent ground truth for a window that only contains this run's data: use the exact current Kyiv day
     const x = await handoverReady(h, a, { codKop: 1_000 });

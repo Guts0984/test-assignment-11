@@ -1,9 +1,9 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslations } from 'next-intl';
 import { DELIVERY_STATUSES, type DeliveryStatus } from '@courier/shared';
 import { Button, TextField } from '@/shared/ui';
-import { EMPTY_FILTERS, type ListFilters } from '@/shared/lib';
+import { EMPTY_FILTERS, isCompleteDate, type ListFilters } from '@/shared/lib';
 
 /** The URL is the single source of truth: this bar only edits a draft and pushes it. "Back" restores the previous one. */
 export function FiltersBar({
@@ -16,16 +16,40 @@ export function FiltersBar({
   const t = useTranslations('filters');
   const ts = useTranslations('status');
   const [draft, setDraft] = useState(value);
-  useEffect(() => setDraft(value), [value]); // browser back/forward changes the URL → refresh the inputs
+  const applied = useRef(value); // what the URL currently holds
+  const latest = useRef(value); // the newest draft, so two quick changes never read a stale one
+  useEffect(() => {
+    latest.current = value;
+    applied.current = value;
+    setDraft(value);
+  }, [value]); // browser back/forward changes the URL → refresh the inputs
+  const update = (next: ListFilters) => {
+    latest.current = next;
+    setDraft(next);
+  };
 
   const toggle = (s: DeliveryStatus) => {
+    const cur = latest.current;
     const next = {
-      ...draft,
+      ...cur,
       page: 1,
-      status: draft.status.includes(s) ? draft.status.filter((x) => x !== s) : [...draft.status, s],
+      status: cur.status.includes(s) ? cur.status.filter((x) => x !== s) : [...cur.status, s],
     };
-    setDraft(next); // the checkbox responds at once; the URL follows
+    update(next); // the checkbox responds at once; the URL follows
     onApply(next);
+  };
+
+  // A date typed with the keyboard passes through half-valid values: keep them in the draft,
+  // but touch the URL only for a cleared or complete valid date (and never lose the other date).
+  const changeDate = (key: 'from' | 'to', v: string) => {
+    const next = { ...latest.current, [key]: v, page: 1 };
+    update(next);
+    if (v === '' ? applied.current[key] === '' : !isCompleteDate(v)) return; // nothing to apply yet
+    const other = key === 'from' ? 'to' : 'from';
+    const o = next[other];
+    const out = { ...next, [other]: o === '' || isCompleteDate(o) ? o : applied.current[other] };
+    applied.current = out;
+    onApply(out);
   };
 
   return (
@@ -35,14 +59,14 @@ export function FiltersBar({
       className="flex flex-col gap-3 rounded-md border border-slate-200 bg-white p-3"
       onSubmit={(e) => {
         e.preventDefault();
-        onApply({ ...draft, page: 1 });
+        onApply({ ...latest.current, page: 1 });
       }}
     >
       <div className="grid gap-3 md:grid-cols-[2fr_1fr_1fr_auto]">
         <TextField
           label={t('search')}
           value={draft.q}
-          onChange={(e) => setDraft({ ...draft, q: e.target.value })}
+          onChange={(e) => update({ ...latest.current, q: e.target.value })}
           placeholder="DLV-000123 / +380…"
           maxLength={64}
         />
@@ -50,13 +74,13 @@ export function FiltersBar({
           label={t('from')}
           type="date"
           value={draft.from}
-          onChange={(e) => onApply({ ...draft, from: e.target.value, page: 1 })}
+          onChange={(e) => changeDate('from', e.target.value)}
         />
         <TextField
           label={t('to')}
           type="date"
           value={draft.to}
-          onChange={(e) => onApply({ ...draft, to: e.target.value, page: 1 })}
+          onChange={(e) => changeDate('to', e.target.value)}
         />
         <div className="flex items-end gap-2">
           <Button type="submit">{t('apply')}</Button>

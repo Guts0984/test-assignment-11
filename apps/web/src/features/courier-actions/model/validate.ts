@@ -1,3 +1,4 @@
+import { LIMITS } from '@courier/shared';
 import { parseMoneyToKop } from '@/shared/lib';
 
 export type DeliverForm = { code: string; amount: string };
@@ -16,7 +17,8 @@ export function validateDeliver(
   if (code === '') errors.code = 'required';
   else if (!/^\d{6}$/.test(code)) errors.code = 'code';
   const kop = f.amount.trim() === '' ? 0 : parseMoneyToKop(f.amount);
-  if (kop === null) errors.amount = 'invalid';
+  // the server refuses amounts above 100 000 ₴; catching it here keeps one bad value from rejecting a whole offline batch
+  if (kop === null || kop > LIMITS.maxCodKop) errors.amount = 'invalid';
   if (!hasPhoto) errors.photo = 'required';
   return Object.keys(errors).length ? { ok: false, errors } : { ok: true, code, kop: kop! };
 }

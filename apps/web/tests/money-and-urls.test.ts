@@ -7,7 +7,7 @@ import {
   parseMoneyToKop,
   formatWeight,
 } from '@/shared/lib';
-import { EMPTY_FILTERS, filtersFromParams, filtersToQuery } from '@/shared/lib';
+import { EMPTY_FILTERS, filtersFromParams, filtersToQuery, isCompleteDate } from '@/shared/lib';
 import { DELIVERY_STATUSES } from '@courier/shared';
 import { parseWeightToGrams, toRequest, EMPTY_FORM } from '@/features/create-delivery';
 
@@ -189,6 +189,35 @@ describe('filters ↔ URL', () => {
     });
     expect(parse('page=abc')).toEqual(EMPTY_FILTERS);
     expect(parse('page=2.5').page).toBe(1);
+  });
+  it('clamps the page, rejects impossible dates, drops `to` when it is before `from`', () => {
+    expect(parse('page=100000').page).toBe(100_000);
+    expect(parse('page=100001').page).toBe(1);
+    expect(parse('page=999999').page).toBe(1);
+    expect(parse('from=2026-02-30&to=2026-02-28')).toMatchObject({ from: '', to: '2026-02-28' });
+    expect(parse('from=2026-03-01&to=2026-02-01')).toMatchObject({ from: '2026-03-01', to: '' });
+    expect(parse('from=2026-03-01&to=2026-03-01')).toMatchObject({
+      from: '2026-03-01',
+      to: '2026-03-01',
+    });
+    expect(parse('from=0002-10-01').from).toBe('');
+  });
+  it('isCompleteDate accepts only complete real dates in 1970..2100', () => {
+    for (const ok of ['2026-02-28', '2024-02-29', '1970-01-01', '2100-12-31'])
+      expect(isCompleteDate(ok), ok).toBe(true);
+    for (const bad of [
+      '',
+      '2026-02',
+      '2026-02-30',
+      '2025-02-29',
+      '0002-10-01',
+      '1969-12-31',
+      '2101-01-01',
+      '2026-13-01',
+      '2026-1-1',
+      'abcd-ef-gh',
+    ])
+      expect(isCompleteDate(bad), bad).toBe(false);
   });
   it('omits defaults so URLs stay short', () => {
     expect(filtersToQuery(EMPTY_FILTERS)).toBe('');

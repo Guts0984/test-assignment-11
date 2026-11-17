@@ -1,6 +1,6 @@
 import { and, eq, sql } from 'drizzle-orm';
 import { schema } from '@courier/db';
-import { startOfLocalDay, type ReportQuery } from '@courier/shared';
+import { LIMITS, startOfLocalDay, type ReportQuery } from '@courier/shared';
 import { appError } from '../errors';
 import {
   ACTIVE,
@@ -68,10 +68,10 @@ export async function assignDelivery(
         courierId: input.courierId,
       });
     const active = await countActive(tx, input.courierId, deliveryId);
-    if (active >= ctx.env.MAX_ACTIVE_DELIVERIES_PER_COURIER) {
+    if (active >= LIMITS.maxActivePerCourier) {
       throw appError('COURIER_LIMIT_REACHED', `The courier already has ${active} deliveries`, {
         active,
-        limit: ctx.env.MAX_ACTIVE_DELIVERIES_PER_COURIER,
+        limit: LIMITS.maxActivePerCourier,
       });
     }
 
@@ -247,16 +247,19 @@ export async function closeShift(
 
 // ───────── board and report (aggregates, raw SQL) ─────────
 
-export async function board(ctx: Ctx) {
+export type BoardOrder = 'oldest' | 'newest';
+
+export async function board(ctx: Ctx, order: BoardOrder = 'oldest') {
   const now = ctx.clock.now();
-  const limit = ctx.env.MAX_ACTIVE_DELIVERIES_PER_COURIER;
+  const limit = LIMITS.maxActivePerCourier;
+  const dir = order === 'newest' ? sql`desc` : sql`asc`;
   const [queue, counts, couriers, blocked] = await Promise.all([
     ctx.db.execute<Record<string, unknown>>(sql`
       select * from (
         select id, public_number, zone, status, created_at, next_attempt_at, attempt_no, recipient_name, weight_g,
-               row_number() over (partition by zone order by created_at, id) as rn
+               row_number() over (partition by zone order by created_at ${dir}, id ${dir}) as rn
         from deliveries where status in ('created', 'failed_attempt')
-      ) x where rn <= 25 order by zone, created_at`),
+      ) x where rn <= 25 order by zone, created_at ${dir}, id ${dir}`),
     ctx.db.execute<{ zone: string; status: string; n: number }>(sql`
       select zone, status, count(*)::int as n from deliveries where status in ('created', 'failed_attempt') group by zone, status`),
     ctx.db.execute<Record<string, unknown>>(sql`
@@ -333,19 +336,28 @@ export async function report(ctx: Ctx, q: ReportQuery) {
       select coalesce(payload->>'reason', 'unknown') as reason, count(*)::int as n from delivery_events
       where type = 'failed_attempt' and server_time >= ${f}::timestamptz and server_time < ${t}::timestamptz
       group by 1 order by 2 desc`),
+    // A handover synced after the shift was closed is recorded in cash_adjustments. It belongs to that shift's expected
+    // cash, so the effective discrepancy is handed - (expected + late adjustments); otherwise the cash would vanish.
     ctx.db.execute<Record<string, unknown>>(sql`
-      select s.id, s.courier_id, p.full_name as courier_name, s.closed_at, s.expected_cash_kop, s.handed_cash_kop, s.discrepancy_kop
+      select s.id, s.courier_id, p.full_name as courier_name, s.closed_at,
+             s.expected_cash_kop + coalesce(a.late, 0) as expected_kop, s.handed_cash_kop,
+             s.handed_cash_kop - (s.expected_cash_kop + coalesce(a.late, 0)) as discrepancy_kop
       from shifts s join profiles p on p.user_id = s.courier_id
-      where s.closed_at >= ${f}::timestamptz and s.closed_at < ${t}::timestamptz and s.discrepancy_kop <> 0
-      order by abs(s.discrepancy_kop) desc, s.closed_at desc limit 200`),
+      left join lateral (select sum(amount_kop) as late from cash_adjustments where shift_id = s.id) a on true
+      where s.closed_at >= ${f}::timestamptz and s.closed_at < ${t}::timestamptz
+        and s.handed_cash_kop - (s.expected_cash_kop + coalesce(a.late, 0)) <> 0
+      order by abs(s.handed_cash_kop - (s.expected_cash_kop + coalesce(a.late, 0))) desc, s.closed_at desc limit 200`),
   ]);
   const totals = await ctx.db.execute<{
     shifts: number;
     total: string | number | null;
     abs_total: string | number | null;
   }>(sql`
-    select count(*)::int as shifts, coalesce(sum(discrepancy_kop), 0) as total, coalesce(sum(abs(discrepancy_kop)), 0) as abs_total
-    from shifts where closed_at >= ${f}::timestamptz and closed_at < ${t}::timestamptz and discrepancy_kop <> 0`);
+    select count(*)::int as shifts, coalesce(sum(d), 0) as total, coalesce(sum(abs(d)), 0) as abs_total
+    from (
+      select s.handed_cash_kop - (s.expected_cash_kop + coalesce((select sum(amount_kop) from cash_adjustments where shift_id = s.id), 0)) as d
+      from shifts s where s.closed_at >= ${f}::timestamptz and s.closed_at < ${t}::timestamptz
+    ) x where d <> 0`);
   const avg = delivered[0]?.avg_seconds;
   return {
     period: { from: q.from, to: q.to },
@@ -366,7 +378,7 @@ export async function report(ctx: Ctx, q: ReportQuery) {
         courierId: r.courier_id,
         courierName: r.courier_name,
         closedAt: toIso(r.closed_at),
-        expectedKop: Number(r.expected_cash_kop),
+        expectedKop: Number(r.expected_kop),
         handedKop: Number(r.handed_cash_kop),
         discrepancyKop: Number(r.discrepancy_kop),
       })),

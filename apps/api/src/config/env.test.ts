@@ -11,10 +11,6 @@ describe('loadEnv', () => {
     const e = loadEnv(minimal);
     expect(e).toMatchObject({
       API_PORT: 4000,
-      MAX_ACTIVE_DELIVERIES_PER_COURIER: 8,
-      PICKUP_TIMEOUT_MINUTES: 45,
-      HANDOVER_MAX_WRONG_CODES: 5,
-      MAX_DELIVERY_ATTEMPTS: 3,
       BUSINESS_TIMEZONE: 'Europe/Kyiv',
       TRUST_PROXY: false,
       WEBHOOK_BACKOFF_MAX_SECONDS: 86_400,
@@ -42,7 +38,7 @@ describe('loadEnv', () => {
     ['API_PORT', 'abc'],
     ['API_PORT', '-1'],
     ['API_PORT', '1.5'],
-    ['MAX_ACTIVE_DELIVERIES_PER_COURIER', '0'],
+    ['RATE_LIMIT_IP_PER_MINUTE', '0'],
     ['TRUST_PROXY', 'yes'],
     ['TRUST_PROXY', '1'],
     ['WEBHOOK_WORKER_ENABLED', 'TRUE'],
@@ -66,6 +62,20 @@ describe('loadEnv', () => {
     expect(e.corsOrigins).toEqual(['https://a.example', 'https://b.example']);
     expect(e.issuer).toBe('https://x.supabase.co/auth/v1');
     expect(e.internalSupabaseUrl).toBe('http://kong:8000');
+  });
+
+  it('the SSRF allow-list ships with the compose stub only, never loopback; hard limits are not settings', () => {
+    const e = loadEnv(minimal);
+    expect(e.WEBHOOK_ALLOWED_PRIVATE_HOSTS).toBe('sender-stub');
+    for (const k of [
+      'MAX_ACTIVE_DELIVERIES_PER_COURIER',
+      'PICKUP_TIMEOUT_MINUTES',
+      'HANDOVER_MAX_WRONG_CODES',
+      'MAX_DELIVERY_ATTEMPTS',
+      'MAX_BATCH_ACTIONS',
+    ]) {
+      expect(k in e, `${k} must not be a setting (the database fixes it)`).toBe(false);
+    }
   });
 
   it('returns a frozen object', () => {

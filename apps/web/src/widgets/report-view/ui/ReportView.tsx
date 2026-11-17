@@ -1,16 +1,22 @@
 'use client';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useLocale, useTranslations } from 'next-intl';
 import { Alert, Button, Spinner, TextField } from '@/shared/ui';
 import { useErrorText } from '@/shared/i18n';
-import { formatDuration, formatMoney, type AppLocale } from '@/shared/lib';
+import {
+  formatDuration,
+  formatMoney,
+  inclusiveDays,
+  isCompleteDate,
+  type AppLocale,
+} from '@/shared/lib';
 import { deliveryKeys } from '@/entities/delivery';
 import { fetchReport } from '@/entities/board';
 
 const isoDay = (d: Date) => d.toISOString().slice(0, 10);
-const DATE = /^\d{4}-\d{2}-\d{2}$/;
+const MAX_DAYS = 366;
 
 export function ReportView() {
   const t = useTranslations('report');
@@ -20,14 +26,33 @@ export function ReportView() {
   const router = useRouter();
   const path = usePathname() ?? '';
   const sp = useSearchParams() ?? new URLSearchParams();
-  const to = DATE.test(sp.get('to') ?? '') ? sp.get('to')! : isoDay(new Date());
-  const from = DATE.test(sp.get('from') ?? '')
-    ? sp.get('from')!
-    : isoDay(new Date(Date.now() - 89 * 86_400_000));
+  const spTo = sp.get('to') ?? '';
+  const spFrom = sp.get('from') ?? '';
+  const to = isCompleteDate(spTo) ? spTo : isoDay(new Date());
+  const from = isCompleteDate(spFrom) ? spFrom : isoDay(new Date(Date.now() - 89 * 86_400_000));
   const [draft, setDraft] = useState({ from, to });
+  const [errors, setErrors] = useState<{ from?: string; to?: string }>({});
+  useEffect(() => {
+    setDraft({ from, to }); // browser back/forward changes the URL → refresh the inputs
+    setErrors({});
+  }, [from, to]);
+
+  /** Client-side period check, so the user sees which field is wrong instead of a generic server error. */
+  const validate = (f: string, t2: string): { from?: string; to?: string } => {
+    const e: { from?: string; to?: string } = {};
+    if (!isCompleteDate(f)) e.from = t('errInvalidDate');
+    if (!isCompleteDate(t2)) e.to = t('errInvalidDate');
+    if (e.from || e.to) return e;
+    if (f > t2) e.from = t('errFromAfterTo');
+    else if (inclusiveDays(f, t2) > MAX_DAYS) e.to = t('errTooLong');
+    return e;
+  };
+  const urlErrors = validate(from, to);
+  const urlInvalid = !!(urlErrors.from || urlErrors.to);
   const q = useQuery({
     queryKey: deliveryKeys.report(from, to),
     queryFn: () => fetchReport(from, to),
+    enabled: !urlInvalid, // a hand-edited URL with a bad period never reaches the server
   });
 
   return (
@@ -37,23 +62,34 @@ export function ReportView() {
         aria-label={t('period')}
         onSubmit={(e) => {
           e.preventDefault();
+          const found = validate(draft.from, draft.to);
+          setErrors(found);
+          if (found.from || found.to) {
+            document.getElementById(found.from ? 'report-from' : 'report-to')?.focus();
+            return;
+          }
           router.push(`${path}?from=${draft.from}&to=${draft.to}`);
         }}
       >
         <TextField
+          id="report-from"
           label={t('from')}
           type="date"
           value={draft.from}
+          error={errors.from}
           onChange={(e) => setDraft({ ...draft, from: e.target.value })}
         />
         <TextField
+          id="report-to"
           label={t('to')}
           type="date"
           value={draft.to}
+          error={errors.to}
           onChange={(e) => setDraft({ ...draft, to: e.target.value })}
         />
         <Button type="submit">{t('show')}</Button>
       </form>
+      {urlInvalid && <Alert>{urlErrors.from ?? urlErrors.to}</Alert>}
       {q.isLoading && <Spinner label={t('loading')} />}
       {q.isError && <Alert>{errorText(q.error)}</Alert>}
       {q.data && (
@@ -99,7 +135,12 @@ export function ReportView() {
             {q.data.cashDiscrepancies.items.length === 0 ? (
               <p className="text-sm text-slate-600">{t('noDiscrepancies')}</p>
             ) : (
-              <div className="max-h-96 overflow-auto">
+              <div
+                className="max-h-96 overflow-auto"
+                tabIndex={0}
+                role="region"
+                aria-label={t('cashRegion')}
+              >
                 <table className="w-full text-left text-sm">
                   <caption className="sr-only">{t('cashTable')}</caption>
                   <thead className="text-xs uppercase text-slate-600">

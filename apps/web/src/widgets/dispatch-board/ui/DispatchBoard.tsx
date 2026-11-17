@@ -1,13 +1,14 @@
 'use client';
 import { useState } from 'react';
 import Link from 'next/link';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import { useLocale, useTranslations } from 'next-intl';
-import { Alert, Button, Spinner } from '@/shared/ui';
+import { Alert, Button, SelectField, Spinner } from '@/shared/ui';
 import { useErrorText } from '@/shared/i18n';
 import { useRealtimeInvalidate } from '@/shared/api';
 import { formatDateTime, type AppLocale } from '@/shared/lib';
-import { fetchBoard, type BoardCourier } from '@/entities/board';
+import { fetchBoard, type BoardCourier, type BoardOrder } from '@/entities/board';
 import { deliveryKeys, StatusBadge } from '@/entities/delivery';
 import { AssignDialog } from '@/features/assign-delivery';
 import { CloseShiftDialog } from '@/features/close-shift';
@@ -17,7 +18,14 @@ export function DispatchBoard() {
   const t = useTranslations('board');
   const locale = useLocale() as AppLocale;
   const errorText = useErrorText();
-  const board = useQuery({ queryKey: deliveryKeys.board, queryFn: fetchBoard });
+  const router = useRouter();
+  const path = usePathname() ?? '';
+  const sp = useSearchParams() ?? new URLSearchParams();
+  const order: BoardOrder = sp.get('order') === 'newest' ? 'newest' : 'oldest';
+  const board = useQuery({
+    queryKey: deliveryKeys.boardOrder(order),
+    queryFn: () => fetchBoard(order),
+  });
   // the board updates by itself whenever a courier does something (RLS-filtered Realtime)
   useRealtimeInvalidate(['deliveries', 'shifts', 'assignments'], [deliveryKeys.board]);
   const [target, setTarget] = useState<{ id: string; number: string; status: string } | null>(null);
@@ -56,9 +64,26 @@ export function DispatchBoard() {
       )}
 
       <section aria-labelledby="sec-queue">
-        <h2 id="sec-queue" className="mb-3 text-lg font-semibold">
-          {t('queue')}
-        </h2>
+        <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
+          <h2 id="sec-queue" className="text-lg font-semibold">
+            {t('queue')}
+          </h2>
+          <SelectField
+            label={t('order')}
+            value={order}
+            onChange={(e) => {
+              // the URL is the source of truth; the default (oldest) keeps the URL clean
+              const next = new URLSearchParams(sp.toString());
+              if (e.target.value === 'newest') next.set('order', 'newest');
+              else next.delete('order');
+              const qs = next.toString();
+              router.replace(qs ? `${path}?${qs}` : path);
+            }}
+          >
+            <option value="oldest">{t('orderOldest')}</option>
+            <option value="newest">{t('orderNewest')}</option>
+          </SelectField>
+        </div>
         <div className="grid gap-4 md:grid-cols-3">
           {b.zones.map((z) => (
             <div
@@ -117,7 +142,12 @@ export function DispatchBoard() {
         <h2 id="sec-couriers" className="mb-3 text-lg font-semibold">
           {t('couriers')}
         </h2>
-        <div className="overflow-x-auto rounded-md border border-slate-200 bg-white">
+        <div
+          className="overflow-x-auto rounded-md border border-slate-200 bg-white"
+          tabIndex={0}
+          role="region"
+          aria-label={t('couriersRegion')}
+        >
           <table className="w-full text-left text-sm">
             <caption className="sr-only">{t('couriers')}</caption>
             <thead className="bg-slate-50 text-xs uppercase text-slate-600">

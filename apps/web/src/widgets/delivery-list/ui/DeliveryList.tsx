@@ -51,7 +51,12 @@ export function DeliveryList({ scope }: { scope: 'sender' | 'dispatcher' }) {
               {t('empty')}
             </p>
           ) : (
-            <div className="overflow-x-auto rounded-md border border-slate-200 bg-white">
+            <div
+              className="overflow-x-auto rounded-md border border-slate-200 bg-white"
+              tabIndex={0}
+              role="region"
+              aria-label={t('tableRegion')}
+            >
               <table className="w-full text-left text-sm">
                 <caption className="sr-only">{t('caption')}</caption>
                 <thead className="bg-slate-50 text-xs uppercase text-slate-600">

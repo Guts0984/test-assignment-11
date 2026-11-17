@@ -148,9 +148,9 @@ which only the service role can change (editing `user_metadata` does nothing; a 
 | `idempotency_keys`, `delivery_number_counter`                   | none              | none                                                                               | none       | none |
 
 Tracking reads go through the API, which reads `delivery_secrets` with the server connection.
-Storage: bucket `delivery-photos` is private (5 MB, jpeg/png/webp). Browsers have no insert/update/delete
-policy. `storage.objects` has one `SELECT` policy (dispatchers, and senders for photos of their own deliveries) so
-signed URLs can only be created by them; paths are `<delivery id>/<photo id>.<ext>`.
+Storage: bucket `delivery-photos` is private (5 MB, jpeg/png/webp) and `storage.objects` has **no policy at all**: no browser key can
+read, list, sign, write or delete there. Photos are served only through the API (`GET /deliveries/:id/photos`), which checks
+ownership and signs URLs with the service role for `SIGNED_URL_TTL_SECONDS` (300 s). Paths are `<delivery id>/<photo id>.<ext>`.
 
 Internal functions live in the `app_private` schema, which PostgREST does not expose, and `EXECUTE` is
 revoked from everyone but the owner.
@@ -320,8 +320,8 @@ All in-process, single API instance (documented limit); the key is the TCP peer 
 - A delivery's code is shown to the recipient on the tracking page and never sent to couriers or senders.
 - `attempt_no` is the number of the current attempt; it grows when a failed delivery is assigned again.
 - The cash a courier is expected to hand in is the sum of `cod_collected_kop` of deliveries attributed to the shift.
-  A handover that arrives after the shift was closed is recorded in `cash_adjustments` and does not change the
-  closed figures.
+  A handover that arrives after the shift was closed is recorded in `cash_adjustments`; the closed figures stay as
+  they were, and the report counts the adjustments as part of that shift's expected cash.
 - "Assigned to delivered" time in the report uses `deliveries.assigned_at` (the latest assignment).
 - Report days and "next day" use `Europe/Kyiv`.
 - Search: `DLV-000123` / `123` match the number; a full or partial phone matches by exact value or prefix (never a
@@ -356,15 +356,19 @@ Every status change writes an outbox row in the **same transaction** (database t
   be sent before `picked_up` has been acknowledged. Different deliveries are independent.
 - **Retries:** pause = 30 s · 2^(n−1) ±20 % jitter, capped at 24 h, forever (nothing is dropped). A request that gets no
   answer is cut after `WEBHOOK_TIMEOUT_MS` and counts as a failure (`timeout`). 3xx is a failure (redirects are never followed).
-- **Concurrency:** rows are claimed with `FOR UPDATE SKIP LOCKED` and stay locked while the request is in flight: several
-  workers or API instances never send the same notification twice.
+- **Concurrency:** a due notification is claimed with a short lease (`FOR UPDATE SKIP LOCKED`, then `next_attempt_at`
+  moves into the future) that is committed _before_ the HTTP request: no database connection or lock is held while waiting
+  for the receiver, and several workers or API instances never send the same notification twice.
+- **Fairness:** a round takes at most 3 due notifications per sender, so a sender whose server hangs cannot delay others.
+- **Manual resend order:** a pending notification can be resent only when it is the head of its delivery's queue (`409`
+  otherwise), so a resend can never put `picked_up` in front of `assigned`.
 - **Time:** the worker uses the injected clock, so tests move time instead of sleeping.
 - **Sender UI/API:** `GET /notifications` (filters, paging), `GET /notifications/:id` (attempt log: status, error,
   duration, manual flag), `POST /notifications/:id/resend` (one immediate attempt, logged as manual; it cannot complete a
   notification out of order), `GET/PUT /webhook` (URL and secret).
 - **SSRF guard:** only http(s), no credentials in the URL, no private, loopback, link-local (cloud metadata), CGNAT or
   `.internal`/`.local` addresses; hostnames are resolved and **every** address must be public. Hosts in
-  `WEBHOOK_ALLOWED_PRIVATE_HOSTS` (default `sender-stub,localhost,127.0.0.1`) are trusted. The check runs when saving
+  `WEBHOOK_ALLOWED_PRIVATE_HOSTS` (default `sender-stub` only) are trusted; add other hosts only deliberately. The check runs when saving
   _and_ when sending. Known limit: a DNS answer can change between the check and the connection.
 - **Sender stub** (`apps/sender-stub`, port 5000): `POST /hook` records and verifies, `GET /` shows what arrived with a
   switch **Answer 200 / Answer 500 / Do not answer**, `GET /api/received`, `POST /api/mode`, `POST /api/reset`.
@@ -401,6 +405,8 @@ root `pages/` folder keeps Next from treating `src/pages` as the old Pages Route
   focused; server `details.fields` are mapped back onto the same fields; double submits are blocked; the create form keeps
   one `Idempotency-Key` per form, so a retry after a lost response cannot create a second delivery.
 - **Keyboard:** native `<dialog>` (focus trap, Esc, focus return), real buttons and labels, a skip link, visible focus.
+- **Tracking is not trusted blindly:** the broadcast channel is public (anyone who learns its unguessable name can also
+  publish to it), so a message only tells the page that something changed; the page then asks the API.
 - **Security:** only the anon key is in the browser; a test scans the production bundle for the service-role key and other
   secrets. Middleware keeps each role in its own area (convenience only; the API and RLS are the real protection). All data
   goes through the API with the user's JWT; browsers never write to the database.
@@ -427,7 +433,9 @@ Built for a phone at 360 px, in `apps/web` (FSD slices `courier-sync`, `courier-
 - **What the courier sees:** a connection badge, "N actions waiting to be sent" (also per delivery), what the list looks
   like with the waiting actions applied (a queued pickup already shows "picked up"), a **Taken away from you** panel
   (reassigned / timed out / cancelled / delivered by someone else) and a **rejected actions** panel with the reason in
-  the user's language. A rejection stays until dismissed; it never disappears silently. A photo the server refuses for
+  the user's language. A rejection stays until dismissed; it never disappears silently. The queue is stored per signed-in courier, so on a shared
+  phone one courier's waiting actions are never sent under another's account; the cached delivery list (recipients' names and
+  phones) is wiped on sign-out. A photo the server refuses for
   good (wrong type, not your delivery) turns its action into such a rejection instead of blocking the queue.
 - The handover code is typed by the courier and checked by the server, so a wrong code surfaces as a rejection after
   sync (see the conflict table above).
@@ -532,10 +540,22 @@ An offline handover with the correct code is also accepted from `created`, `assi
 - Rate limiting is in-process (no Redis, as required): correct for one API instance. With several instances each keeps
   its own buckets (the database-side invariants and the webhook worker are safe with any number of instances).
 - The webhook SSRF check resolves the host before connecting; a DNS answer could change in between.
-- The courier app opens offline from the second visit on (the first visit installs the service worker); the handover code
-  is checked by the server, so a wrong code is reported after sync.
-- The dispatcher board lists the 25 oldest waiting deliveries per zone (first in, first out); any delivery can be found with
-  search and assigned from its card.
+- The courier app works offline from the first signed-in visit: the service worker stores the app shell when it installs and
+  receives the scripts the page already loaded. The handover code is checked by the server, so a wrong code is reported after
+  sync.
+- The dispatcher board lists 25 waiting deliveries per zone, oldest first by default or newest first (`?order=newest`); it has
+  no filters of its own. Filters, search and paging are on `/dispatcher/deliveries`, and any delivery can be assigned from its
+  card.
+- Hard business limits (8 active deliveries, 45 minutes, 5 wrong codes, 3 attempts, batches of 100) are enforced by the
+  database and fixed in `@courier/shared`; they are deliberately not environment settings.
+- Signing out ends the session in the browser, but an access token that was already issued stays valid until it expires (up
+  to one hour): the API verifies signature and expiry, not the session row.
+- The local Auth sign-in rate limit is raised to 300 per 5 minutes so the test suite can log in many users; production should
+  use Supabase's defaults.
+- PostgREST lets a signed-in user read the history rows of their own deliveries, including the actor ids the API strips from
+  its own responses.
+- The webhook worker tests must be the only worker on the database: run `docker compose stop api` before
+  `pnpm test:integration` (the test refuses to start otherwise).
 - Local Supabase accepts the public demo JWT secret; production must use its own keys.
 - Bugs found by the tests while building (each has a regression test): lock-upgrade deadlocks (database triggers and the
   action processor), tokens without `exp` accepted, slow request bodies, partial phone search, **signed photo URLs using the

@@ -9,13 +9,19 @@ interface CourierDB extends DBSchema {
 
 const NAME = 'courier-app';
 const VERSION = 1;
-let dbPromise: Promise<IDBPDatabase<CourierDB>> | null = null;
+const handles = new Map<string, Promise<IDBPDatabase<CourierDB>>>();
 
+/** One database per name. The courier app uses one per user, so a shared phone never mixes two couriers' queues. */
 export function openStore(name = NAME): Promise<IDBPDatabase<CourierDB>> {
-  if (name !== NAME) return openDB<CourierDB>(name, VERSION, { upgrade: upgrade });
-  dbPromise ??= openDB<CourierDB>(NAME, VERSION, { upgrade });
-  return dbPromise;
+  let h = handles.get(name);
+  if (!h) {
+    h = openDB<CourierDB>(name, VERSION, { upgrade });
+    handles.set(name, h);
+  }
+  return h;
 }
+
+export const storeNameFor = (userId: string): string => `courier-app-${userId}`;
 
 function upgrade(db: IDBPDatabase<CourierDB>): void {
   db.createObjectStore('queue', { keyPath: 'clientActionId' });
@@ -24,7 +30,7 @@ function upgrade(db: IDBPDatabase<CourierDB>): void {
 }
 
 export function resetStoreHandle(): void {
-  dbPromise = null;
+  handles.clear();
 }
 
 export type Store = {
@@ -32,6 +38,7 @@ export type Store = {
   mutate(fn: (s: SyncState) => SyncState): Promise<SyncState>;
   getMeta<T>(key: string): Promise<T | undefined>;
   setMeta(key: string, value: unknown): Promise<void>;
+  deleteMeta(key: string): Promise<void>;
 };
 
 /** The device store. Every change is one IndexedDB transaction, so a reload or crash never leaves half a change. */
@@ -73,6 +80,10 @@ export function createStore(open: () => Promise<IDBPDatabase<CourierDB>> = openS
     async setMeta(key, value) {
       const db = await open();
       await db.put('meta', value, key);
+    },
+    async deleteMeta(key) {
+      const db = await open();
+      await db.delete('meta', key);
     },
   };
 }

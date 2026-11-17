@@ -100,83 +100,138 @@ export function createWebhookWorker(deps: WorkerDeps) {
     select 1 from notifications p where p.delivery_id = (select delivery_id from notifications where id = ${id})
       and p.seq < (select seq from notifications where id = ${id}) and p.status = 'pending')`;
 
-  /**
-   * One delivery attempt for one notification. The row stays locked while the request is in flight, so a second
-   * worker (or a second API instance) skips it: no double sends. Only the head of a delivery's queue is eligible,
-   * which is what keeps `delivered` from overtaking `picked_up`.
-   */
-  async function attempt(
+  type Outcome = { notification: typeof n.$inferSelect; result: Attempt };
+
+  /** Records one attempt and updates the notification. `lease` is true when the row was claimed by `claim`. */
+  async function record(
     id: string,
-    opts: { manual: boolean; sender?: string; ignoreSchedule?: boolean },
-  ) {
+    r: Attempt,
+    manual: boolean,
+  ): Promise<typeof n.$inferSelect | null> {
     return ctx.db.transaction(async (tx) => {
       const now = ctx.clock.now();
-      const found = await tx.execute<{ id: string }>(sql`
-        select id from notifications where id = ${id}
-          ${opts.sender ? sql`and sender_id = ${opts.sender}` : sql``}
-          ${opts.manual ? sql`` : sql`and status = 'pending' and next_attempt_at <= ${now.toISOString()}::timestamptz and ${headOfQueue(id)}`}
-        for update ${opts.manual ? sql`` : sql`skip locked`}`);
-      if (found.length === 0) return null;
-      const [row] = await tx.select().from(n).where(eq(n.id, id));
-      const [hook] = await tx
-        .select()
-        .from(schema.senderWebhooks)
-        .where(eq(schema.senderWebhooks.senderId, row!.senderId));
-      const r: Attempt = hook
-        ? await post(hook.url, hook.secret, row!)
-        : { ok: false, httpStatus: null, error: 'no webhook URL configured', durationMs: 0 };
+      const [row] = await tx.select().from(n).where(eq(n.id, id)).for('update');
+      if (!row) return null;
       await tx.insert(schema.notificationAttempts).values({
         notificationId: id,
         attemptedAt: now,
         httpStatus: r.httpStatus,
         error: r.error,
         durationMs: r.durationMs,
-        manual: opts.manual,
+        manual,
       });
-      const canComplete =
-        row!.status === 'pending'
-          ? (await tx.execute(sql`select 1 where ${headOfQueue(id)}`)).length > 0
-          : false;
-      let patch: Partial<typeof n.$inferInsert>;
-      if (row!.status === 'delivered') {
-        patch = {}; // a manual resend of a delivered one only adds an attempt
-      } else if (r.ok && (!opts.manual || canComplete)) {
-        patch = {
-          status: 'delivered',
-          deliveredAt: now,
-          attempts: row!.attempts + 1,
-          lastError: null,
-        };
-      } else if (opts.manual) {
-        patch = { lastError: r.error };
-      } else {
-        const wait = backoffSeconds(row!.attempts + 1, {
-          base: ctx.env.WEBHOOK_BACKOFF_BASE_SECONDS,
-          max: ctx.env.WEBHOOK_BACKOFF_MAX_SECONDS,
-          jitter: random() * 2 - 1,
-        });
-        patch = {
-          attempts: row!.attempts + 1,
-          lastError: r.error,
-          nextAttemptAt: new Date(now.getTime() + wait * 1000),
-        };
+      let patch: Partial<typeof n.$inferInsert> = {};
+      if (row.status === 'pending') {
+        if (r.ok) {
+          patch = {
+            status: 'delivered',
+            deliveredAt: now,
+            attempts: row.attempts + 1,
+            lastError: null,
+          };
+        } else if (manual) {
+          patch = { lastError: r.error };
+        } else {
+          const wait = backoffSeconds(row.attempts + 1, {
+            base: ctx.env.WEBHOOK_BACKOFF_BASE_SECONDS,
+            max: ctx.env.WEBHOOK_BACKOFF_MAX_SECONDS,
+            jitter: random() * 2 - 1,
+          });
+          patch = {
+            attempts: row.attempts + 1,
+            lastError: r.error,
+            nextAttemptAt: new Date(now.getTime() + wait * 1000),
+          };
+        }
       }
-      const [updated] = Object.keys(patch).length
-        ? await tx.update(n).set(patch).where(eq(n.id, id)).returning()
-        : [row!];
-      return { notification: updated!, result: r };
+      if (Object.keys(patch).length === 0) return row;
+      const [updated] = await tx.update(n).set(patch).where(eq(n.id, id)).returning();
+      return updated!;
     });
   }
 
-  /** Sends everything that is due. Safe to call concurrently and from several processes. */
-  async function tick(opts: { senderId?: string } = {}): Promise<{ attempted: number }> {
+  /**
+   * Claims a due notification: it must still be pending, due, and the head of its delivery's queue. The claim is a short
+   * LEASE (next_attempt_at moves into the future) committed immediately, so no database connection or lock is held while
+   * we wait for the receiver, and another worker or API instance will not pick the same row. If this process dies mid
+   * request, the lease simply expires and the notification is tried again.
+   */
+  async function claim(id: string): Promise<typeof n.$inferSelect | null> {
+    return ctx.db.transaction(async (tx) => {
+      const now = ctx.clock.now();
+      const found = await tx.execute<{ id: string }>(sql`
+        select id from notifications where id = ${id} and status = 'pending'
+          and next_attempt_at <= ${now.toISOString()}::timestamptz and ${headOfQueue(id)}
+        for update skip locked`);
+      if (found.length === 0) return null;
+      const lease = new Date(now.getTime() + ctx.env.WEBHOOK_TIMEOUT_MS * 2 + 5_000);
+      const [row] = await tx
+        .update(n)
+        .set({ nextAttemptAt: lease })
+        .where(eq(n.id, id))
+        .returning();
+      return row!;
+    });
+  }
+
+  async function send(row: typeof n.$inferSelect): Promise<Attempt> {
+    const [hook] = await ctx.db
+      .select()
+      .from(schema.senderWebhooks)
+      .where(eq(schema.senderWebhooks.senderId, row.senderId));
+    return hook
+      ? post(hook.url, hook.secret, row)
+      : { ok: false, httpStatus: null, error: 'no webhook URL configured', durationMs: 0 };
+  }
+
+  /** One automatic attempt: claim → send (no transaction open) → record. */
+  async function attempt(id: string): Promise<Outcome | null> {
+    const row = await claim(id);
+    if (!row) return null;
+    const result = await send(row);
+    const notification = await record(id, result, false);
+    return notification ? { notification, result } : null;
+  }
+
+  /**
+   * A manual resend. Delivered notifications may be sent again at any time (same id). A PENDING one may only be sent
+   * when it is the head of its delivery's queue, otherwise "picked_up" could reach the receiver before "assigned".
+   */
+  async function resend(id: string, senderId: string): Promise<Outcome | { blocked: true } | null> {
+    const [row] = await ctx.db
+      .select()
+      .from(n)
+      .where(and(eq(n.id, id), eq(n.senderId, senderId)));
+    if (!row) return null;
+    if (row.status === 'pending') {
+      const head = await ctx.db.execute(sql`select 1 where ${headOfQueue(id)}`);
+      if (head.length === 0) return { blocked: true };
+    }
+    const result = await send(row);
+    const notification = await record(id, result, true);
+    return notification ? { notification, result } : null;
+  }
+
+  /**
+   * Sends everything that is due. Safe to call concurrently and from several processes. Fair: at most PER_SENDER due
+   * notifications per sender are taken in one round, so a sender whose server is dead (each try holds a worker for the
+   * full timeout) cannot starve everyone else's notifications.
+   */
+  const PER_SENDER = 3;
+  async function tick(
+    opts: { senderId?: string; senderIds?: string[] } = {},
+  ): Promise<{ attempted: number }> {
     const now = ctx.clock.now().toISOString();
     const due = await ctx.db.execute<{ id: string }>(sql`
-      select n.id from notifications n
-      where n.status = 'pending' and n.next_attempt_at <= ${now}::timestamptz
-        ${opts.senderId ? sql`and n.sender_id = ${opts.senderId}` : sql``}
-        and not exists (select 1 from notifications p where p.delivery_id = n.delivery_id and p.seq < n.seq and p.status = 'pending')
-      order by n.next_attempt_at limit 50`);
+      select id from (
+        select n.id, n.next_attempt_at,
+               row_number() over (partition by n.sender_id order by n.next_attempt_at, n.id) as rn
+        from notifications n
+        where n.status = 'pending' and n.next_attempt_at <= ${now}::timestamptz
+          ${opts.senderId ? sql`and n.sender_id = ${opts.senderId}` : sql``}
+          ${opts.senderIds ? sql`and n.sender_id = any(${opts.senderIds}::uuid[])` : sql``}
+          and not exists (select 1 from notifications p where p.delivery_id = n.delivery_id and p.seq < n.seq and p.status = 'pending')
+      ) x where rn <= ${PER_SENDER} order by next_attempt_at limit 50`);
     let attempted = 0;
     const queue = [...due];
     await Promise.all(
@@ -184,7 +239,7 @@ export function createWebhookWorker(deps: WorkerDeps) {
         for (;;) {
           const next = queue.shift();
           if (!next) return;
-          const r = await attempt(next.id, { manual: false }).catch(() => null);
+          const r = await attempt(next.id).catch(() => null);
           if (r) attempted++;
         }
       }),
@@ -195,6 +250,7 @@ export function createWebhookWorker(deps: WorkerDeps) {
   return {
     tick,
     attempt,
+    resend,
     start() {
       if (timer) return;
       timer = setInterval(() => {
@@ -272,8 +328,15 @@ export async function resendNotification(
   senderId: string,
   id: string,
 ) {
-  const r = await worker.attempt(id, { manual: true, sender: senderId });
+  const r = await worker.resend(id, senderId);
   if (!r) throw notFound('Notification');
+  if ('blocked' in r) {
+    throw appError(
+      'CONFLICT',
+      'An earlier notification for this delivery is still waiting; it must be delivered first',
+      { reason: 'earlier_pending' },
+    );
+  }
   return {
     notification: notificationDto(r.notification),
     attempt: { ok: r.result.ok, httpStatus: r.result.httpStatus, error: r.result.error },

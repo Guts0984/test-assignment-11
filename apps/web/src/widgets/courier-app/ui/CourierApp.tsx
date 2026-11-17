@@ -32,17 +32,17 @@ export function CourierApp() {
 
   const today = useQuery({
     queryKey: KEY,
-    enabled: sync.ready,
+    enabled: sync.ready && !!sync.store,
     refetchInterval: sync.online ? 30_000 : false,
     queryFn: async (): Promise<Today> => {
       try {
         const data = await fetchToday();
-        await sync.store.setMeta('today', data);
+        await sync.store?.setMeta('today', data);
         return data;
       } catch (e) {
         // no connection: show what the device knew last time
         if (isApiError(e) && e.code === 'NETWORK') {
-          const cached = await sync.store.getMeta<Today>('today');
+          const cached = await sync.store?.getMeta<Today>('today');
           if (cached) return { ...cached, stale: true };
         }
         throw e;

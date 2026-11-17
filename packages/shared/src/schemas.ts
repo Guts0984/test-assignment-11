@@ -128,6 +128,15 @@ export const courierBatchSchema = z
   });
 export type CourierBatch = z.infer<typeof courierBatchSchema>;
 
+/**
+ * What the API validates for the batch as a whole: only the envelope. Each action is validated on its own, so one
+ * malformed action is rejected with a reason instead of discarding the valid handovers sent in the same batch.
+ */
+export const courierBatchEnvelopeSchema = z.strictObject({
+  actions: z.array(z.unknown()).min(1).max(LIMITS.maxBatchActions),
+});
+export type CourierBatchEnvelope = z.infer<typeof courierBatchEnvelopeSchema>;
+
 export const photoKindSchema = z.enum(PHOTO_KINDS);
 
 // ───────── queries ─────────

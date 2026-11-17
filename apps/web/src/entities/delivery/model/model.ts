@@ -64,6 +64,7 @@ export const deliveryKeys = {
   card: (id: string) => ['deliveries', 'card', id] as const,
   photos: (id: string) => ['deliveries', 'photos', id] as const,
   board: ['board'] as const,
+  boardOrder: (order: string) => ['board', order] as const,
   report: (from: string, to: string) => ['report', from, to] as const,
   notifications: (query: string) => ['notifications', query] as const,
   webhook: ['webhook'] as const,

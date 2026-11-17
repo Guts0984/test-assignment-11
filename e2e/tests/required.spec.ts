@@ -121,11 +121,28 @@ test.describe('acceptance 19 / required e2e 2: the courier works offline', () =>
     await login(phone, world.courier, /\/courier$/);
     const card = phone.getByTestId('delivery').filter({ hasText: d.publicNumber });
     await expect(card).toBeVisible();
-    // let the service worker take control and cache the app, then cut the network
-    await phone.evaluate(() => navigator.serviceWorker.ready.then(() => true));
-    await phone.reload();
-    await expect(card).toBeVisible();
-    await phone.evaluate(() => navigator.serviceWorker.ready);
+    // a FRESH login, no extra reload: once the worker has stored the app shell and its scripts, the network can go
+    await expect
+      .poll(
+        () =>
+          phone.evaluate(
+            async () => !!(await caches.match('/courier')) && (await caches.keys()).length > 0,
+          ),
+        { timeout: 20_000 },
+      )
+      .toBe(true);
+    await expect
+      .poll(
+        () =>
+          phone.evaluate(
+            async () =>
+              (await (await caches.open('courier-shell-v2')).keys()).filter((r) =>
+                r.url.includes('/_next/static/'),
+              ).length,
+          ),
+        { timeout: 20_000 },
+      )
+      .toBeGreaterThan(3);
     await phone.context().setOffline(true);
     await expect(phone.getByTestId('net')).toContainText('Offline');
 

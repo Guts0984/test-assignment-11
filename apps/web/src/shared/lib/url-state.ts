@@ -1,5 +1,6 @@
 import type { DeliveryStatus } from '@courier/shared';
 import { DELIVERY_STATUSES } from '@courier/shared';
+import { isCompleteDate } from './dates';
 
 export type ListFilters = {
   q: string;
@@ -10,20 +11,24 @@ export type ListFilters = {
 };
 export const EMPTY_FILTERS: ListFilters = { q: '', status: [], from: '', to: '', page: 1 };
 
+const MAX_PAGE = 100_000;
+
 type Params = { get(k: string): string | null; getAll(k: string): string[] };
 
 /** URL → filters. Anything invalid is dropped silently, so a hand-edited URL never breaks the page. */
 export function filtersFromParams(p: Params): ListFilters {
-  const date = (v: string | null) => (v && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : '');
+  const date = (v: string | null) => (v && isCompleteDate(v) ? v : '');
   const page = Number(p.get('page') ?? 1);
+  const from = date(p.get('from'));
+  const to = date(p.get('to'));
   return {
     q: (p.get('q') ?? '').slice(0, 64),
     status: p
       .getAll('status')
       .filter((s): s is DeliveryStatus => (DELIVERY_STATUSES as readonly string[]).includes(s)),
-    from: date(p.get('from')),
-    to: date(p.get('to')),
-    page: Number.isInteger(page) && page >= 1 ? page : 1,
+    from,
+    to: from && to && from > to ? '' : to,
+    page: Number.isInteger(page) && page >= 1 && page <= MAX_PAGE ? page : 1,
   };
 }
 

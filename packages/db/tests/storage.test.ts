@@ -45,7 +45,7 @@ const roles = () => ({
   anon: anonClient(),
 });
 
-describe('private bucket: who can obtain a signed URL (invariant 12)', () => {
+describe('private bucket: browsers cannot read, list or sign anything (invariant 12)', () => {
   it('the bucket is private with a size limit and image-only mime types', async () => {
     const [b] =
       await sql`select public, file_size_limit, allowed_mime_types from storage.buckets where id = ${BUCKET}`;
@@ -54,77 +54,59 @@ describe('private bucket: who can obtain a signed URL (invariant 12)', () => {
     expect([...b!.allowed_mime_types].sort()).toEqual(['image/jpeg', 'image/png', 'image/webp']);
   });
 
-  const matrix: [keyof ReturnType<typeof roles>, 'A' | 'B', boolean][] = [
-    ['senderA', 'A', true],
-    ['senderA', 'B', false],
-    ['senderB', 'A', false],
-    ['senderB', 'B', true],
-    ['dispatcher', 'A', true],
-    ['dispatcher', 'B', true],
-    ['courierA', 'A', false],
-    ['courierA', 'B', false], // couriers upload via the API, they never read back
-    ['courierB', 'A', false],
-    ['courierB', 'B', false],
-    ['sneaky', 'A', false],
-    ['sneaky', 'B', false],
-    ['anon', 'A', false],
-    ['anon', 'B', false],
-  ];
-  it.each(matrix)(
-    '%s createSignedUrl for photo of %s → allowed: %s',
-    async (role, which, allowed) => {
+  it('no policy exists on the bucket: access is only through the API, which signs short-lived URLs', async () => {
+    const rows =
+      await sql`select policyname from pg_policies where schemaname = 'storage' and tablename = 'objects'`;
+    expect(rows).toEqual([]);
+  });
+
+  const roleNames = [
+    'senderA',
+    'senderB',
+    'courierA',
+    'courierB',
+    'dispatcher',
+    'sneaky',
+    'anon',
+  ] as const;
+  it.each(roleNames.flatMap((r) => (['A', 'B'] as const).map((w) => [r, w] as const)))(
+    '%s cannot sign, download or list photo of %s',
+    async (role, which) => {
       const path = which === 'A' ? pathA : pathB;
-      const { data, error } = await roles()[role].storage.from(BUCKET).createSignedUrl(path, 60);
-      if (!allowed) {
-        expect(data?.signedUrl ?? null).toBeNull();
-        expect(error).not.toBeNull();
-        return;
-      }
-      expect(error).toBeNull();
-      const res = await fetch(data!.signedUrl);
-      expect(res.status).toBe(200);
-      expect(Buffer.from(await res.arrayBuffer()).equals(which === 'A' ? bytesA : bytesB)).toBe(
-        true,
-      );
+      const c = roles()[role].storage.from(BUCKET);
+      const signed = await c.createSignedUrl(path, 60);
+      expect(signed.data?.signedUrl ?? null).toBeNull();
+      expect(signed.error).not.toBeNull();
+      expect((await c.download(path)).error).not.toBeNull();
+      expect((await c.list(path.split('/')[0]!)).data ?? []).toHaveLength(0);
     },
   );
 
-  it('direct download follows the same rules', async () => {
-    expect((await w.sessions.senderA.client.storage.from(BUCKET).download(pathA)).error).toBeNull();
-    expect(
-      (await w.sessions.senderA.client.storage.from(BUCKET).download(pathB)).error,
-    ).not.toBeNull();
-    expect((await anonClient().storage.from(BUCKET).download(pathA)).error).not.toBeNull();
-  });
-
-  it('listing shows a sender only their own delivery folders', async () => {
-    const own = await w.sessions.senderA.client.storage.from(BUCKET).list(w.deliveries.dA1.id);
-    expect(own.data?.map((o) => o.name)).toEqual([`${w.photos.A}.jpg`]);
-    const foreign = await w.sessions.senderA.client.storage.from(BUCKET).list(w.deliveries.dB1.id);
-    expect(foreign.data ?? []).toHaveLength(0);
-    const root = await w.sessions.senderA.client.storage.from(BUCKET).list('');
-    const names = (root.data ?? []).map((o) => o.name);
-    expect(names).not.toContain(w.deliveries.dB1.id);
-  });
-
-  it('path traversal does not reach another sender’s photo', async () => {
-    const sneaky = `${w.deliveries.dA1.id}/../${w.deliveries.dB1.id}/${w.photos.B}.jpg`;
-    const { data } = await w.sessions.senderA.client.storage
+  it('a user cannot mint a long-lived link for their own photo (the 10-year signed URL bypass)', async () => {
+    const r = await w.sessions.senderA.client.storage
       .from(BUCKET)
-      .createSignedUrl(sneaky, 60);
-    if (data?.signedUrl) {
-      const res = await fetch(data.signedUrl);
-      expect(res.status).not.toBe(200);
-    }
-    for (const p of [
-      `${w.deliveries.dB1.id}%2F${w.photos.B}.jpg`,
-      `./${pathB}`,
-      `${pathB}/`,
-      `//${pathB}`,
-    ]) {
-      const r = await w.sessions.senderA.client.storage.from(BUCKET).createSignedUrl(p, 60);
-      expect(r.data?.signedUrl ?? null).toBeNull();
-    }
+      .createSignedUrl(pathA, 10 * 365 * 86_400);
+    expect(r.data?.signedUrl ?? null).toBeNull();
+    expect(r.error).not.toBeNull();
+  });
+
+  it('the authenticated object endpoint refuses a sender who owns the delivery', async () => {
+    const res = await fetch(
+      `${env.supabaseUrl}/storage/v1/object/authenticated/${BUCKET}/${pathA}`,
+      {
+        headers: { apikey: env.anonKey, Authorization: `Bearer ${w.sessions.senderA.accessToken}` },
+      },
+    );
+    expect(res.status).not.toBe(200);
+  });
+
+  it('the service role (the API) can sign, and the signed URL serves exactly the stored bytes', async () => {
+    const { data, error } = await adminClient().storage.from(BUCKET).createSignedUrl(pathA, 60);
+    expect(error).toBeNull();
+    const res = await fetch(data!.signedUrl);
+    expect(res.status).toBe(200);
+    expect(Buffer.from(await res.arrayBuffer()).equals(bytesA)).toBe(true);
+    expect((await fetch(data!.signedUrl.replace(pathA, pathB))).status).not.toBe(200);
   });
 });
 
@@ -193,18 +175,14 @@ describe('browsers cannot write to the bucket', () => {
 
 describe('signed URLs expire and cannot be reused for other objects', () => {
   it('a signed URL stops working after its lifetime', async () => {
-    const { data } = await w.sessions.dispatcher.client.storage
-      .from(BUCKET)
-      .createSignedUrl(pathA, 2);
+    const { data } = await adminClient().storage.from(BUCKET).createSignedUrl(pathA, 2);
     expect((await fetch(data!.signedUrl)).status).toBe(200);
     await sleep(3500);
     expect((await fetch(data!.signedUrl)).status).not.toBe(200);
   });
 
   it('a tampered token is refused', async () => {
-    const { data } = await w.sessions.senderA.client.storage
-      .from(BUCKET)
-      .createSignedUrl(pathA, 60);
+    const { data } = await adminClient().storage.from(BUCKET).createSignedUrl(pathA, 60);
     const url = new URL(data!.signedUrl);
     const token = url.searchParams.get('token')!;
     const [h, p, s] = token.split('.');
@@ -213,9 +191,7 @@ describe('signed URLs expire and cannot be reused for other objects', () => {
   });
 
   it('a token for photo A does not unlock photo B', async () => {
-    const { data } = await w.sessions.senderA.client.storage
-      .from(BUCKET)
-      .createSignedUrl(pathA, 60);
+    const { data } = await adminClient().storage.from(BUCKET).createSignedUrl(pathA, 60);
     const url = new URL(data!.signedUrl);
     url.pathname = url.pathname.replace(encodeURI(pathA), encodeURI(pathB)).replace(pathA, pathB);
     expect(url.pathname).toContain(w.deliveries.dB1.id);

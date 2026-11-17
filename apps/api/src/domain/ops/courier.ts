@@ -1,6 +1,16 @@
 import { and, desc, eq, gt, inArray, sql } from 'drizzle-orm';
 import { schema } from '@courier/db';
-import { canForceHandover, nextAttemptAt, type CourierAction } from '@courier/shared';
+import {
+  LIMITS,
+  canForceHandover,
+  courierActionSchema,
+  deliverActionSchema,
+  failActionSchema,
+  pickupActionSchema,
+  nextAttemptAt,
+  uuidSchema,
+  type CourierAction,
+} from '@courier/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { appError } from '../errors';
 import { safeEqual, sha256Hex } from '../secrets';
@@ -72,7 +82,7 @@ export async function courierToday(ctx: Ctx, courierId: string) {
   ]);
   return {
     shift: shift[0] ? { id: shift[0].id, openedAt: shift[0].openedAt.toISOString() } : null,
-    limit: ctx.env.MAX_ACTIVE_DELIVERIES_PER_COURIER,
+    limit: LIMITS.maxActivePerCourier,
     deliveries: rows.map(courierDto),
     removed: removed.map((r) => ({
       deliveryId: r.a.deliveryId,
@@ -233,7 +243,7 @@ const pickup: Handler = async (tx, ctx, courierId, a, now) => {
     if (!(await openShiftOf(tx, courierId)))
       return rejected(a, 'SHIFT_CLOSED', 'Your shift is closed');
     const active = await countActive(tx, courierId, row.id);
-    if (active >= ctx.env.MAX_ACTIVE_DELIVERIES_PER_COURIER) {
+    if (active >= LIMITS.maxActivePerCourier) {
       return rejected(
         a,
         'COURIER_LIMIT_REACHED',
@@ -319,7 +329,7 @@ const deliver: Handler = async (tx, ctx, courierId, a, now) => {
     .where(eq(schema.deliverySecrets.deliveryId, row.id));
   if (!secret || !safeEqual(a.code, secret.recipientCode)) {
     const streak = row.wrongCodeStreak + 1;
-    const blocked = streak >= ctx.env.HANDOVER_MAX_WRONG_CODES;
+    const blocked = streak >= LIMITS.maxWrongCodes;
     await tx
       .update(d)
       .set({ wrongCodeStreak: streak, handoverBlocked: blocked })
@@ -351,7 +361,7 @@ const deliver: Handler = async (tx, ctx, courierId, a, now) => {
       'WRONG_CODE',
       blocked ? 'Wrong code. The handover is now blocked' : 'Wrong code',
       {
-        attemptsLeft: Math.max(0, ctx.env.HANDOVER_MAX_WRONG_CODES - streak),
+        attemptsLeft: Math.max(0, LIMITS.maxWrongCodes - streak),
         blocked,
       },
     );
@@ -431,7 +441,7 @@ const fail: Handler = async (tx, ctx, courierId, a, now) => {
   if (!(await photoOk(tx, a.photoId, row.id, courierId, 'failed'))) {
     return rejected(a, 'PHOTO_REQUIRED', 'The photo of the door or entrance was not uploaded');
   }
-  const last = row.attemptNo >= ctx.env.MAX_DELIVERY_ATTEMPTS;
+  const last = row.attemptNo >= LIMITS.maxAttempts;
   await tx
     .update(d)
     .set({
@@ -572,10 +582,50 @@ export async function processAction(
   });
 }
 
-export async function processBatch(ctx: Ctx, courierId: string, actions: CourierAction[]) {
-  const results: ActionOutcome[] = [];
-  // In the order the device recorded them: "pick up" must be applied before "deliver".
-  for (const a of actions) results.push(await processAction(ctx, courierId, a));
+export type InvalidActionOutcome = {
+  clientActionId: string | null;
+  index: number;
+  result: 'rejected';
+  code: 'VALIDATION_FAILED';
+  message: string;
+  details: { fields: Record<string, string> };
+};
+
+/**
+ * Every action is validated on its own, then processed in the order the device recorded them ("pick up" must be applied
+ * before "deliver"). An invalid action gets its own rejection; the others in the batch are unaffected.
+ */
+export async function processBatch(ctx: Ctx, courierId: string, raw: unknown[]) {
+  const results: (ActionOutcome | InvalidActionOutcome)[] = [];
+  for (const [index, item] of raw.entries()) {
+    // validate against the schema of the declared type, so errors name the exact field (not an opaque union failure)
+    const type = (item as { type?: unknown } | null)?.type;
+    const schema =
+      type === 'pickup'
+        ? pickupActionSchema
+        : type === 'deliver'
+          ? deliverActionSchema
+          : type === 'fail'
+            ? failActionSchema
+            : courierActionSchema;
+    const parsed = schema.safeParse(item);
+    if (!parsed.success) {
+      const fields: Record<string, string> = {};
+      for (const i of parsed.error.issues)
+        fields[i.path.map(String).join('.') || 'action'] ??= i.message;
+      const id = (item as { clientActionId?: unknown } | null)?.clientActionId;
+      results.push({
+        clientActionId: typeof id === 'string' && uuidSchema.safeParse(id).success ? id : null,
+        index,
+        result: 'rejected',
+        code: 'VALIDATION_FAILED',
+        message: 'This action is not valid',
+        details: { fields },
+      });
+      continue;
+    }
+    results.push(await processAction(ctx, courierId, parsed.data as CourierAction));
+  }
   return { results };
 }
 

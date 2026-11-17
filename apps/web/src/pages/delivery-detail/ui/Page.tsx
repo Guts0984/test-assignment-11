@@ -28,7 +28,11 @@ function ReturnedButton({ id }: { id: string }) {
 function AssignButton({ id, number, status }: { id: string; number: string; status: string }) {
   const tb = useTranslations('board');
   const [open, setOpen] = useState(false);
-  const board = useQuery({ queryKey: deliveryKeys.board, queryFn: fetchBoard, enabled: open });
+  const board = useQuery({
+    queryKey: deliveryKeys.boardOrder('oldest'),
+    queryFn: () => fetchBoard(),
+    enabled: open,
+  });
   return (
     <>
       <Button onClick={() => setOpen(true)}>{tb('assign')}</Button>

@@ -19,6 +19,7 @@ import { z, type ZodType } from 'zod';
 import {
   assignSchema,
   closeShiftSchema,
+  courierBatchEnvelopeSchema,
   courierBatchSchema,
   createDeliverySchema,
   deliveryListQuerySchema,
@@ -32,7 +33,7 @@ import {
   webhookSettingsSchema,
   type NotificationListQuery,
   type WebhookSettings,
-  type CourierBatch,
+  type CourierBatchEnvelope,
   type CreateDeliveryInput,
   type DeliveryListQuery,
   type ReportQuery,
@@ -53,6 +54,7 @@ import {
 import {
   assignDelivery,
   board,
+  type BoardOrder,
   closeShift,
   markReturned,
   report,
@@ -86,6 +88,9 @@ const docBody = (schema: ZodType) => {
   }
   return ApiBody({ schema: js });
 };
+
+/** Only `order` is read; other query keys are ignored for this route. */
+const boardQuerySchema = z.object({ order: z.enum(['oldest', 'newest']).default('oldest') });
 
 const idParam = zod(uuidSchema);
 const user = (req: AuthedRequest) => req.user!;
@@ -191,8 +196,8 @@ export class DispatchController {
   constructor(@Inject(CTX_TOKEN) private readonly ctx: Ctx) {}
 
   @Get('board')
-  board() {
-    return board(this.ctx);
+  board(@Query(zod(boardQuerySchema)) q: { order: BoardOrder }) {
+    return board(this.ctx, q.order);
   }
 
   @Get('deliveries')
@@ -271,7 +276,10 @@ export class CourierController {
   @HttpCode(200)
   @docBody(courierBatchSchema)
   @Post('actions')
-  actions(@Req() req: AuthedRequest, @Body(zod(courierBatchSchema)) body: CourierBatch) {
+  actions(
+    @Req() req: AuthedRequest,
+    @Body(zod(courierBatchEnvelopeSchema)) body: CourierBatchEnvelope,
+  ) {
     return processBatch(this.ctx, user(req).id, body.actions);
   }
 

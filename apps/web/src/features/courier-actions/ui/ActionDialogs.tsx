@@ -1,5 +1,5 @@
 'use client';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useLocale, useTranslations } from 'next-intl';
 import { FAIL_REASONS, type CourierAction } from '@courier/shared';
 import { Button, Dialog, SelectField, TextField } from '@/shared/ui';
@@ -18,6 +18,12 @@ export type Submit = (
     contentType: string;
   },
 ) => Promise<void>;
+
+/** After a failed submit keyboard focus goes to the first invalid field instead of staying on the button. */
+const focusFirst = (form: HTMLFormElement | null, selectors: (string | false)[]) => {
+  const sel = selectors.find((s): s is string => !!s);
+  if (sel) form?.querySelector<HTMLElement>(sel)?.focus();
+};
 
 const base = (deliveryId: string) => ({
   clientActionId: crypto.randomUUID(),
@@ -42,6 +48,7 @@ export function DeliverDialog({
   const [photo, setPhoto] = useState<Picked | null>(null);
   const [errors, setErrors] = useState<Partial<Record<'code' | 'amount' | 'photo', string>>>({});
   const [busy, setBusy] = useState(false);
+  const formRef = useRef<HTMLFormElement>(null);
   const reset = () => {
     setCode('');
     setAmount('');
@@ -74,6 +81,11 @@ export function DeliverDialog({
         amount: msg(r.errors.amount),
         photo: r.errors.photo ? t('photoRequired') : undefined,
       });
+      focusFirst(formRef.current, [
+        !!r.errors.code && 'input[inputmode="numeric"]',
+        !!r.errors.amount && 'input[inputmode="decimal"]',
+        !!r.errors.photo && 'input[type="file"]',
+      ]);
       return;
     }
     setBusy(true);
@@ -92,6 +104,7 @@ export function DeliverDialog({
       title={target ? t('deliverTitle', { number: target.number }) : ''}
     >
       <form
+        ref={formRef}
         onSubmit={(e) => {
           e.preventDefault();
           void submit();
@@ -148,6 +161,7 @@ export function FailDialog({
   const [photo, setPhoto] = useState<Picked | null>(null);
   const [errors, setErrors] = useState<{ note?: string; photo?: string }>({});
   const [busy, setBusy] = useState(false);
+  const formRef = useRef<HTMLFormElement>(null);
   const close = () => {
     setReason('recipient_absent');
     setNote('');
@@ -163,7 +177,13 @@ export function FailDialog({
     if (reason === 'other' && note.trim() === '') e.note = tf('required');
     if (!photo) e.photo = t('photoRequired');
     setErrors(e);
-    if (e.note || e.photo) return;
+    if (e.note || e.photo) {
+      focusFirst(formRef.current, [
+        !!e.note && 'input:not([type="file"])',
+        !!e.photo && 'input[type="file"]',
+      ]);
+      return;
+    }
     setBusy(true);
     const photoId = crypto.randomUUID();
     await onSubmit(
@@ -186,6 +206,7 @@ export function FailDialog({
       title={target ? t('failTitle', { number: target.number }) : ''}
     >
       <form
+        ref={formRef}
         onSubmit={(e) => {
           e.preventDefault();
           void submit();

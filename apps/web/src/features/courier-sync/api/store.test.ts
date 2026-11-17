@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { IDBFactory } from 'fake-indexeddb';
 import { openDB } from 'idb';
 import type { CourierAction } from '@courier/shared';
-import { createStore, openStore, resetStoreHandle } from './store';
+import { createStore, openStore, resetStoreHandle, storeNameFor } from './store';
 import { applyResults, enqueue, type ServerResult, type SyncState } from '../model/engine';
 import { runSync, type SyncDeps } from '../model/runner';
 
@@ -35,6 +35,49 @@ beforeEach(() => {
   // a brand-new, empty browser profile for every test
   (globalThis as { indexedDB: IDBFactory }).indexedDB = new IDBFactory();
   resetStoreHandle();
+});
+
+describe('per-user device stores (shared phones)', () => {
+  it('two couriers on one phone never see each other’s queue, photos or cached list', async () => {
+    const c22 = createStore(() => openStore(storeNameFor('courier-22')));
+    const c23 = createStore(() => openStore(storeNameFor('courier-23')));
+    const d = deliver(uuid());
+    await c22.mutate((s) =>
+      enqueue(s, { clientActionId: d.clientActionId, action: d, number: 'DLV-9' }, photoFor(d)),
+    );
+    await c22.setMeta('today', {
+      deliveries: [{ recipientName: 'Olena', recipientPhone: '+380671234567' }],
+    });
+    expect((await c23.read()).queue).toHaveLength(0);
+    expect((await c23.read()).photos).toHaveLength(0);
+    expect(await c23.getMeta('today')).toBeUndefined();
+    // what courier 23 sends can never contain courier 22's action
+    const sent: string[] = [];
+    await runSync({
+      read: () => c23.read(),
+      mutate: (fn) => c23.mutate(fn),
+      upload: async () => 'ok',
+      send: async (a) => {
+        sent.push(...a.map((x) => x.clientActionId));
+        return [];
+      },
+    });
+    expect(sent).toEqual([]);
+    // courier 22's own queue is intact for their next sign-in
+    expect((await c22.read()).queue.map((q) => q.clientActionId)).toEqual([d.clientActionId]);
+  });
+
+  it('the cached list is removed on sign-out, the queue is kept', async () => {
+    const store = createStore(() => openStore(storeNameFor('courier-1')));
+    const a = pickup(uuid());
+    await store.mutate((s) =>
+      enqueue(s, { clientActionId: a.clientActionId, action: a, number: 'x' }),
+    );
+    await store.setMeta('today', { deliveries: [{ recipientPhone: '+380671234567' }] });
+    await store.deleteMeta('today');
+    expect(await store.getMeta('today')).toBeUndefined();
+    expect((await store.read()).queue).toHaveLength(1);
+  });
 });
 
 describe('device store (IndexedDB)', () => {

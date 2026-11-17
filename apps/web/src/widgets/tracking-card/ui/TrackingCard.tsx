@@ -4,7 +4,7 @@ import { useLocale, useTranslations } from 'next-intl';
 import type { DeliveryStatus } from '@courier/shared';
 import { Alert, Spinner } from '@/shared/ui';
 import { api, isApiError } from '@/shared/api';
-import { useTrackingBroadcast, type TrackingMessage } from '@/shared/api';
+import { useTrackingBroadcast } from '@/shared/api';
 import { formatDateTime, formatMoney, type AppLocale } from '@/shared/lib';
 import { StatusBadge } from '@/entities/delivery';
 
@@ -34,23 +34,10 @@ export function TrackingCard({ token }: { token: string }) {
     queryFn: () => api<View>(`/tracking/${token}`, { anonymous: true }),
     retry: false,
   });
-  useTrackingBroadcast(q.data?.channel, (m: TrackingMessage) => {
-    qc.setQueryData<View>(key, (old) =>
-      old
-        ? {
-            ...old,
-            status: m.status as DeliveryStatus,
-            attemptNo: m.attemptNo,
-            courierName: m.courierName,
-            amountDueKop: m.amountDueKop,
-            updatedAt: m.updatedAt,
-            timeline:
-              old.timeline.at(-1)?.status === m.status
-                ? old.timeline
-                : [...old.timeline, { status: m.status as DeliveryStatus, at: m.updatedAt }],
-          }
-        : old,
-    );
+  // The broadcast channel is public (anyone who knows the unguessable name can also SEND to it), so its payload is never
+  // shown. A message only means "something changed": the page then asks the API, which is the source of truth.
+  useTrackingBroadcast(q.data?.channel, () => {
+    void qc.invalidateQueries({ queryKey: key });
   });
 
   if (q.isLoading) return <Spinner label={t('loading')} />;
