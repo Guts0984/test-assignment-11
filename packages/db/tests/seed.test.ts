@@ -37,10 +37,10 @@ describe('seed: shape (3 senders, 2 dispatchers, 30 couriers, 50 000 deliveries 
     expect(Number(r.oldest_days)).toBeLessThan(91);
     expect(Number(r.newest_days)).toBeLessThan(1);
     const future = await one(sql<{ n: number }[]>`select (
-        (select count(*) from public.deliveries where created_at > now() or updated_at > now() or delivered_at > now())
-      + (select count(*) from public.delivery_events where server_time > now())
-      + (select count(*) from public.assignments where assigned_at > now() or ended_at > now())
-      + (select count(*) from public.shifts where opened_at > now() or closed_at > now()))::int n`);
+        (select count(*) from public.deliveries where sender_id = any(${SEED_SENDERS}) and (created_at > now() or updated_at > now() or delivered_at > now()))
+      + (select count(*) from public.delivery_events e join public.deliveries d on d.id = e.delivery_id where d.sender_id = any(${SEED_SENDERS}) and e.server_time > now())
+      + (select count(*) from public.assignments a join public.deliveries d on d.id = a.delivery_id where d.sender_id = any(${SEED_SENDERS}) and (a.assigned_at > now() or a.ended_at > now()))
+      + (select count(*) from public.shifts where courier_id = any(${SEED_COURIERS}) and (opened_at > now() or closed_at > now())))::int n`);
     expect(future.n).toBe(0);
   });
 
@@ -158,7 +158,7 @@ describe('seed: internal consistency (these find generator bugs)', () => {
     expect(bad[0]!.n).toBe(0);
     // next_attempt_at is a Kyiv midnight
     const notMidnight = await sql`select count(*)::int n from public.deliveries
-      where status = 'failed_attempt' and (next_attempt_at at time zone 'Europe/Kyiv')::time <> '00:00'`;
+      where status = 'failed_attempt' and sender_id = any(${SEED_SENDERS}) and (next_attempt_at at time zone 'Europe/Kyiv')::time <> '00:00'`;
     expect(notMidnight[0]!.n).toBe(0);
   });
 

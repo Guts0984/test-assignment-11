@@ -33,4 +33,4 @@ jobs:
       - run: pnpm build
       - run: cp .env.example .env
       - run: pnpm supabase start
-      - run: pnpm test:db
+      - run: pnpm test:integration

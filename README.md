@@ -173,6 +173,134 @@ inserts (fixed with a `BEFORE INSERT` lock trigger), a misleading error when ass
 Realtime stubs for anonymous subscribers, the Realtime second-channel token issue, and a Drizzle quirk that
 breaks `sql.json()` on the client it wraps.
 
+## API (`apps/api`)
+
+NestJS 11 on Express, Drizzle over a direct Postgres connection (transactions and `SELECT … FOR UPDATE` live here,
+not in `supabase-js`), Zod validation from `@courier/shared`. Swagger UI at **`/docs`** (`/docs-json` for the raw
+document). Classes exist only for Nest building blocks (controllers, guard, filter, pipe); all business logic is
+plain functions in `src/domain` (a lint rule enforces it).
+
+```bash
+pnpm --filter @courier/api dev        # or: pnpm build && pnpm --filter @courier/api start
+```
+
+`src/config/env.ts` parses every variable with Zod: secrets (`DATABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`) have no
+default and stop the boot with one readable error; everything else has a default.
+
+### What the API does and what Supabase does
+
+|                      | `apps/api`                                                                                                                                                                                          | Supabase                                              |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| Login                | verifies the JWT: ES256/RS256 through the project's JWKS, HS256 only if `SUPABASE_JWT_SECRET` is set; `alg` is pinned per key type, `exp`/`sub`/`iss`/`aud` required, role only from `app_metadata` | GoTrue issues tokens                                  |
+| Writes               | **all of them**: create, cancel, assign, courier actions, shifts, unblock, photos                                                                                                                   | browsers cannot write (no grants)                     |
+| Reads for the UI     | REST endpoints (board, lists, cards, report, tracking)                                                                                                                                              | RLS-protected `SELECT` + Realtime for live updates    |
+| Photos               | validates (magic bytes, size), stores with the service role, signs URLs                                                                                                                             | private bucket, policies                              |
+| Last line of defence | takes locks and gives good errors first                                                                                                                                                             | triggers and constraints refuse illegal states anyway |
+
+### Endpoints
+
+| Role               | Method and path                                                            | Purpose                                                                     |
+| ------------------ | -------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| public             | `GET /health`, `GET /tracking/:token`                                      | liveness; recipient view                                                    |
+| any                | `GET /me`                                                                  | who am I                                                                    |
+| sender             | `POST /deliveries/quote`                                                   | price preview (server computed)                                             |
+| sender             | `POST /deliveries` + `Idempotency-Key`                                     | create → `201`, replay → `200` + `Idempotent-Replay: true`                  |
+| sender             | `GET /deliveries?q&status&from&to&page&pageSize`                           | own deliveries                                                              |
+| sender, dispatcher | `GET /deliveries/:id`, `GET /deliveries/:id/photos`                        | card with history; signed photo URLs (`SIGNED_URL_TTL_SECONDS`)             |
+| sender             | `POST /deliveries/:id/cancel`                                              | before pickup                                                               |
+| dispatcher         | `GET /dispatch/board`                                                      | queue per zone, courier load `n/8`, shift state, blocked handovers          |
+| dispatcher         | `GET /dispatch/deliveries`                                                 | all deliveries, same filters                                                |
+| dispatcher         | `POST /dispatch/deliveries/:id/assign` `{courierId, reassign}`             | assign / explicit reassign                                                  |
+| dispatcher         | `POST /dispatch/deliveries/:id/unblock`, `…/returned`                      | unblock handover; `returning → returned`                                    |
+| dispatcher         | `GET /dispatch/couriers/:id/shift`, `POST …/shift/close` `{handedCashKop}` | expected cash; close with discrepancy                                       |
+| dispatcher         | `GET /dispatch/report?from&to`                                             | delivered, mean assign→deliver time, failures by reason, cash discrepancies |
+| courier            | `POST /courier/shift/open`, `GET /courier/today`                           | shift; today's list + deliveries taken away from them                       |
+| courier            | `POST /courier/actions` `{actions: [...]}`                                 | batch of pickup / deliver / fail, each with a device-made id                |
+| courier            | `GET /courier/actions/rejected`                                            | rejected actions with reasons                                               |
+| courier            | `PUT /courier/photos/:photoId?deliveryId&kind`                             | raw image body, idempotent                                                  |
+
+Errors always look like `{ "error": { "code", "message", "details?", "requestId" } }`. Validation errors carry
+`details.fields` (`{"address.city": "…"}`) so forms can show them next to the field. Codes and their HTTP status
+are in `packages/shared/src/errors.ts`; bad input is always 4xx. A foreign resource answers `404`, exactly like a
+missing one.
+
+### Courier actions and offline conflicts
+
+Each action has a `clientActionId` made on the device. The API locks the delivery row, then the courier row, then
+inserts the action row `ON CONFLICT DO NOTHING`: a retry (even a parallel one) finds the stored outcome and returns
+it unchanged. Outcomes are `applied` or `rejected` with a code and message, stored in `courier_actions`.
+
+| Offline action                                | Server state at sync                                                       | Result                                                                                                                     |
+| --------------------------------------------- | -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| pickup                                        | assigned to me                                                             | applied                                                                                                                    |
+| pickup                                        | already picked up by me                                                    | applied, no-op                                                                                                             |
+| pickup                                        | released by the 45-minute job, nobody else took it                         | applied (taken back) if I have a shift and fewer than 8 deliveries, else rejected `SHIFT_CLOSED` / `COURIER_LIMIT_REACHED` |
+| pickup                                        | reassigned to another courier                                              | rejected `REASSIGNED`                                                                                                      |
+| pickup                                        | cancelled                                                                  | rejected `CANCELLED`                                                                                                       |
+| deliver, correct code                         | assigned to me / picked up by me / back in the queue / waiting for a retry | **applied**                                                                                                                |
+| deliver, correct code                         | reassigned to another courier (assigned or picked up)                      | **applied**; the other courier's assignment ends with `delivered_by_other` and they see it in `removed`                    |
+| deliver, correct code                         | cancelled                                                                  | rejected `CANCELLED`                                                                                                       |
+| deliver, correct code                         | already delivered by someone else                                          | rejected `INVALID_STATUS`                                                                                                  |
+| deliver, correct code                         | I was never assigned this delivery                                         | rejected `NOT_YOUR_DELIVERY`                                                                                               |
+| deliver                                       | handover blocked                                                           | rejected `HANDOVER_BLOCKED` (resend after the dispatcher unblocks)                                                         |
+| deliver, wrong code                           | any                                                                        | rejected `WRONG_CODE`; counts towards the 5; the 5th blocks                                                                |
+| deliver, wrong amount                         | any                                                                        | rejected `COD_MISMATCH` (not counted as a wrong code)                                                                      |
+| deliver, photo missing or of another delivery | any                                                                        | rejected `PHOTO_REQUIRED`                                                                                                  |
+| deliver                                       | my shift was closed meanwhile                                              | applied; the cash goes to `cash_adjustments` of that shift                                                                 |
+| fail                                          | picked up by me                                                            | applied (`failed_attempt`, or `returning` after the 3rd)                                                                   |
+| fail                                          | anything else                                                              | rejected with `REASSIGNED` / `CANCELLED` / `NOT_YOUR_DELIVERY` / `INVALID_STATUS`                                          |
+| any                                           | same `clientActionId` as before                                            | the stored outcome is returned, nothing is applied again                                                                   |
+
+The code cannot be checked offline (the device never gets it), so a wrong code shows up as a rejection after sync.
+
+### Abuse protection (no Redis)
+
+All in-process, single API instance (documented limit); the key is the TCP peer address.
+
+- **Fair share before anything else:** at most `MAX_INFLIGHT_PER_IP` simultaneous requests per address (and
+  `MAX_INFLIGHT_GLOBAL` in total), checked before body parsing, authentication and the DB pool. One client cannot
+  hold every worker.
+- **Token buckets** per IP and per user, plus stricter buckets for creation, unblock, shift close and photo upload
+  (`RATE_LIMIT_SENSITIVE_PER_MINUTE`) and for tracking (`RATE_LIMIT_TRACKING_PER_MINUTE`, per IP). The key set is
+  bounded (`RATE_LIMIT_MAX_TRACKED_KEYS`), so rotating identities cannot grow memory.
+- `X-Forwarded-For`, `X-Real-IP` and `Forwarded` are **ignored** unless `TRUST_PROXY=true` (only behind a proxy
+  you control). The compose setup has no proxy, so a spoofed header cannot buy a fresh bucket or burn someone
+  else's.
+- Slowloris: sockets that do not deliver a request head within `HEADERS_TIMEOUT_MS`, or a body within
+  `REQUEST_TIMEOUT_MS`, are destroyed by a sweep every 500 ms (Node's own check runs only every 30 s).
+- Body limits (256 KB JSON, 5 MB photos), `415` for non-JSON bodies, strict Zod schemas (unknown keys are errors),
+  `statement_timeout` on the pool, `helmet`, CORS allowlist, `Cache-Control: no-store`.
+- Defaults are generous enough for real use and for the 50-parallel-requests scenarios; the abuse suite runs with
+  scaled-down limits.
+
+### Decisions
+
+- Prices, codes and tokens are generated only on the server; the 6-digit handover code uses `crypto.randomInt`.
+- A delivery's code is shown to the recipient on the tracking page and never sent to couriers or senders.
+- `attempt_no` is the number of the current attempt; it grows when a failed delivery is assigned again.
+- The cash a courier is expected to hand in is the sum of `cod_collected_kop` of deliveries attributed to the shift.
+  A handover that arrives after the shift was closed is recorded in `cash_adjustments` and does not change the
+  closed figures.
+- "Assigned to delivered" time in the report uses `deliveries.assigned_at` (the latest assignment).
+- Report days and "next day" use `Europe/Kyiv`.
+- Search: `DLV-000123` / `123` match the number; a full or partial phone matches by exact value or prefix (never a
+  leading wildcard, so it uses the index); any other text matches nothing.
+
+### API tests (`pnpm --filter @courier/api test`; need the running Supabase)
+
+| File                 | What it does                                                                                                                                                                                                                                                                                                                           |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `invariants.test.ts` | invariants 1–9, 11, 14 with real concurrent HTTP: 10 identical creates, 50 parallel creates, two dispatchers racing 25 times, 7+2 assignments 25 times, 40 cancel-vs-pickup races, 20 parallel wrong codes, the same batch 8 times in parallel, offline handover after reassignment, cash vs late handover 20 races, photo idempotency |
+| `lifecycle.test.ts`  | acceptance flows (3, 4, 5), every assignment refusal, cancel rules, price quote vs tariff, 22 invalid-create cases, role × route matrix, search / filters / pagination against SQL, board and report against SQL, tracking privacy, uniform errors                                                                                     |
+| `abuse.test.ts`      | a flood from `127.0.0.2` while a victim on `127.0.0.3` keeps working, `X-Forwarded-For` spoofing, in-flight fairness, per-user budgets, tracking enumeration, 150 slowloris sockets, 13 hostile payloads, malformed URLs and headers, CORS, 25 forged / tampered / confused JWTs                                                       |
+| `fuzz.test.ts`       | ~1 350 generated requests over every route and role: never a 5xx, always the error format                                                                                                                                                                                                                                              |
+| `src/**/*.test.ts`   | pure unit tests (`pnpm test:unit`): token bucket properties, error mapping, search intent, image sniffing, env parsing                                                                                                                                                                                                                 |
+
+Bugs these tests found: the same lock-upgrade deadlock as in the database, this time in the action processor
+(shared FK lock then exclusive lock: fixed by locking delivery → courier before inserting the action row),
+tokens without an `exp` claim being accepted, a trickling request body not being cut off, partial phone numbers
+that look like full ones not matching by prefix, framework-wrapped JSON errors being reported as validation errors.
+
 ## Money, tariff and rounding
 
 Money is always an integer number of kopecks.
