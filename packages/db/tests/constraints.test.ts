@@ -19,7 +19,7 @@ import {
   quickSender,
 } from '../src/testing/fixtures';
 
-const { sql } = useDb();
+const { sql } = useDb(35); // local Postgres allows 100 connections in total; Supabase itself uses ~50
 
 const ACTORS = ['sender', 'dispatcher', 'courier', 'system'] as const;
 const expectedAllowed = (from: DeliveryStatus, to: DeliveryStatus): boolean =>

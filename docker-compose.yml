@@ -19,6 +19,7 @@ services:
       WEBHOOK_BACKOFF_BASE_SECONDS: ${WEBHOOK_BACKOFF_BASE_SECONDS:-30}
       WEBHOOK_TIMEOUT_MS: ${WEBHOOK_TIMEOUT_MS:-10000}
       TRUST_PROXY: 'false'
+      DB_POOL_MAX: ${DB_POOL_MAX:-10} # local Postgres allows 100 connections in total
     healthcheck:
       test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:4000/health']
       interval: 5s

@@ -3,7 +3,7 @@ import { createSql } from '../src/client';
 import { testEnv } from '../src/testing/env';
 
 /** A pool for one test file; closed automatically. `max` is large so concurrency tests really run in parallel. */
-export function useDb(max = 60) {
+export function useDb(max = 35) {
   const sql = createSql({ url: testEnv().databaseUrl, max });
   afterAll(async () => {
     await sql.end({ timeout: 5 });
