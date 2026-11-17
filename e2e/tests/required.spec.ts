@@ -134,12 +134,13 @@ test.describe('acceptance 19 / required e2e 2: the courier works offline', () =>
     await expect
       .poll(
         () =>
-          phone.evaluate(
-            async () =>
-              (await (await caches.open('courier-shell-v2')).keys()).filter((r) =>
-                r.url.includes('/_next/static/'),
-              ).length,
-          ),
+          phone.evaluate(async () => {
+            const name = (await caches.keys()).find((k) => k.startsWith('courier-shell-'));
+            if (!name) return 0;
+            return (await (await caches.open(name)).keys()).filter((r) =>
+              r.url.includes('/_next/static/'),
+            ).length;
+          }),
         { timeout: 20_000 },
       )
       .toBeGreaterThan(3);
