@@ -73,7 +73,7 @@ jobs:
       - run: pnpm supabase start
       - run: docker compose up --build -d --wait
       - run: pnpm --filter @courier/e2e exec playwright install --with-deps chromium
-      - run: pnpm test:e2e -- tests/${{ matrix.spec }}.spec.ts
+      - run: pnpm --filter @courier/e2e exec playwright test tests/${{ matrix.spec }}.spec.ts
       - if: failure()
         run: docker compose logs --no-color | tail -200
       - if: always()

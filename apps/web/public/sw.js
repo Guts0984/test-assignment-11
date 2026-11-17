@@ -5,9 +5,11 @@
  *   worker controlled the page, so it never saw them.
  * - /_next/static/*, icons, manifest: cache-first (content-hashed, safe to keep)
  * - navigations to /courier: network-first, falling back to the last copy
+ * - navigations to /login: network, falling back to the copy kept at install (offline sign-out)
  * API calls go to another origin and are never touched here: offline actions live in IndexedDB, not in this cache. */
-const CACHE = 'courier-shell-v2';
+const CACHE = 'courier-shell-v3';
 const SHELL = '/courier';
+const LOGIN = '/login';
 
 async function keepShell(cache) {
   try {
@@ -16,6 +18,14 @@ async function keepShell(cache) {
     if (res.ok && res.type !== 'opaqueredirect') await cache.put(SHELL, res);
   } catch {
     /* offline during install: the next online visit keeps it */
+  }
+  // The sign-in page is public. Fetched WITHOUT the session cookie, so it is the real page and not a redirect into the
+  // app. Signing out while offline lands here instead of on the browser's "no internet" page.
+  try {
+    const res = await fetch(LOGIN, { credentials: 'omit', redirect: 'manual' });
+    if (res.ok && res.type !== 'opaqueredirect') await cache.put(LOGIN, res);
+  } catch {
+    /* kept on the next online visit */
   }
 }
 
@@ -89,6 +99,22 @@ self.addEventListener('fetch', (event) => {
         const res = await fetch(req);
         if (res.ok) cache.put(req, res.clone());
         return res;
+      })(),
+    );
+    return;
+  }
+
+  if (req.mode === 'navigate' && url.pathname === LOGIN) {
+    event.respondWith(
+      (async () => {
+        try {
+          return await fetch(req);
+        } catch {
+          return (
+            (await (await caches.open(CACHE)).match(LOGIN)) ||
+            new Response('Offline', { status: 503, headers: { 'Content-Type': 'text/plain' } })
+          );
+        }
       })(),
     );
     return;
