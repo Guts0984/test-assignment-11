@@ -8,7 +8,12 @@ import { test, expect, login } from './fixtures';
 async function signOut(page: Page): Promise<void> {
   await page.getByRole('button', { name: 'Sign out', exact: true }).click();
   const confirm = page.getByRole('dialog').getByRole('button', { name: 'Sign out anyway' });
-  if (await confirm.isVisible({ timeout: 1500 }).catch(() => false)) await confirm.click();
+  // the warning is computed asynchronously (it reads the device queue), so wait for it instead of checking once
+  const warned = await confirm.waitFor({ state: 'visible', timeout: 3000 }).then(
+    () => true,
+    () => false,
+  );
+  if (warned) await confirm.click();
 }
 
 test.describe('dispatcher: two colleagues, one delivery', () => {
