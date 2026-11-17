@@ -1,6 +1,16 @@
 import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
 
+/**
+ * Redirects must never be cached: the browser replays cached 307s when the user presses Back, and
+ * /login → /sender → /login would then loop forever after signing out.
+ */
+function redirect(url: URL): NextResponse {
+  const res = NextResponse.redirect(url);
+  res.headers.set('Cache-Control', 'no-store');
+  return res;
+}
+
 const HOME: Record<string, string> = {
   sender: '/sender',
   dispatcher: '/dispatcher',
@@ -19,9 +29,11 @@ const PREFIX: Record<string, string> = {
 export async function middleware(req: NextRequest) {
   let res = NextResponse.next({ request: req });
   const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL ?? '',
+    // server-side calls use the internal URL (inside Docker, 127.0.0.1 is the container itself)
+    process.env.SUPABASE_INTERNAL_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '',
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? '',
     {
+      cookieOptions: { name: 'sb-courier-auth' },
       cookies: {
         getAll: () => req.cookies.getAll(),
         setAll: (items) => {
@@ -40,18 +52,18 @@ export async function middleware(req: NextRequest) {
   if (area && !role) {
     const url = req.nextUrl.clone();
     url.pathname = '/login';
-    return NextResponse.redirect(url);
+    return redirect(url);
   }
   if (area && role && area !== role) {
     const url = req.nextUrl.clone();
     url.pathname = HOME[role] ?? '/login';
     url.search = '';
-    return NextResponse.redirect(url);
+    return redirect(url);
   }
   if (path === '/login' && role) {
     const url = req.nextUrl.clone();
     url.pathname = HOME[role] ?? '/';
-    return NextResponse.redirect(url);
+    return redirect(url);
   }
   res.headers.set('Cache-Control', 'no-store');
   return res;

@@ -3,7 +3,48 @@
 City delivery service: senders create deliveries, dispatchers hand them to couriers, couriers work from a
 phone (often offline), recipients follow a tracking link and tell the courier a code.
 
-> This README grows block by block. Sections marked _(planned)_ are filled in by later commits.
+## Quick start
+
+```bash
+cp .env.example .env
+supabase start               # or: pnpm supabase start (the CLI is a dev dependency)
+docker compose up --build
+```
+
+`supabase start` applies the migrations (`supabase/migrations`), creates the private photo bucket and loads the seed
+(`supabase/seed.sql`; about 45 s the first time) by itself. `docker compose` then starts
+
+| Service       | URL                                      | What                                                                                         |
+| ------------- | ---------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `web`         | http://localhost:3000                    | sender cabinet, dispatcher, tracking, `/courier` phone app                                   |
+| `api`         | http://localhost:4000 (Swagger: `/docs`) | the business API                                                                             |
+| `sender-stub` | http://localhost:5000                    | the sender's server double: shows notifications, **Answer 200 / Answer 500 / Do not answer** |
+
+No other manual steps. Sign in with the demo logins below (`sender1@example.com` / `Sender-Pass-123`, ...).
+Containers reach Supabase through the Docker host gateway (`host.docker.internal`); the browser uses
+`http://127.0.0.1:54321`. The local keys in `.env.example` are the Supabase CLI's public defaults.
+
+### Tests
+
+```bash
+pnpm install && pnpm build
+pnpm lint && pnpm typecheck
+pnpm test               # unit tests, no services (shared, web, stub, api units)
+pnpm test:integration   # database + API against a running `supabase start`
+pnpm test:e2e           # Playwright against the running stack (supabase + docker compose)
+```
+
+The e2e backoff is shortened with `WEBHOOK_BACKOFF_BASE_SECONDS=2` in `.env` (default 30). CI runs all of it on every
+commit (`.github/workflows/ci.yml`: static + unit, database + API, e2e).
+
+| Suite                                                                    | Tests     | Where                            |
+| ------------------------------------------------------------------------ | --------- | -------------------------------- |
+| shared (tariff, status machine, time, schemas)                           | 425       | `packages/shared`                |
+| database (constraints, races, RLS, Realtime, Storage, seed, perf, drift) | 388       | `packages/db/tests`              |
+| API (invariants, lifecycle, abuse, fuzz, webhooks) + units               | 201 + 132 | `apps/api/tests`, `apps/api/src` |
+| sender stub                                                              | 5         | `apps/sender-stub`               |
+| web (i18n, helpers, forms, bundle scan) + courier sync                   | 104       | `apps/web`                       |
+| end to end (real Chromium)                                               | 16        | `e2e/tests`                      |
 
 ## Repository layout
 
@@ -440,3 +481,63 @@ An offline handover with the correct code is also accepted from `created`, `assi
 - Webhook retry pauses double from 30 s up to 24 h and then repeat every 24 h; notifications are never dropped.
 - Phone numbers are normalised to E.164; local Ukrainian forms (`0671234567`, `380…`) are accepted.
 - API error codes live in `packages/shared/src/errors.ts` and are the only place that maps a code to an HTTP status.
+
+## Invariants → where they are tested
+
+| #   | Invariant                               | Mechanism                                           | Tests                                                                                           |
+| --- | --------------------------------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| 1   | one delivery per `Idempotency-Key`      | advisory lock on (sender, key), request hash        | `invariants.test.ts` (10 parallel, other body → 409, mixed bodies in parallel)                  |
+| 2   | gapless `DLV-…` numbers                 | counter row inside the creating transaction         | `constraints.test.ts` (50 + 20 rollbacks), `invariants.test.ts` (50 parallel)                   |
+| 3   | a delivery never with two couriers      | delivery row lock + unique partial index            | `invariants.test.ts` (25 rounds), `constraints.test.ts`                                         |
+| 4   | at most 8 active                        | courier row lock + trigger lock                     | `invariants.test.ts` (7+2 ×25, 20 at once → 8), `constraints.test.ts` (50 rounds)               |
+| 5   | cancel vs pickup: one outcome           | both lock the delivery row                          | `invariants.test.ts` (40 races, three views agree)                                              |
+| 6   | the code cannot be brute-forced         | check under the delivery lock, block at 5           | `invariants.test.ts` (20 parallel → exactly 5 compared; also one batch of 20)                   |
+| 7   | an action is applied once               | action row `ON CONFLICT DO NOTHING` under the locks | `invariants.test.ts` (batch twice, 8 in parallel), sync tests (lost responses)                  |
+| 8   | a right-code handover always counts     | forced handover from any non-terminal status        | `invariants.test.ts` (reassigned, released, never-assigned, cancelled), offline table           |
+| 9   | a rejection is never silent             | stored in `courier_actions` and on the device       | `invariants.test.ts`, `store.test.ts`, e2e (rejected panel survives reload)                     |
+| 10  | notifications: HMAC, id, order, backoff | outbox + head-of-queue worker                       | `webhooks.test.ts`, e2e (stub down then up)                                                     |
+| 11  | cash adds up                            | courier lock shared by delivery and close           | `invariants.test.ts` (20 close-vs-late-handover races), e2e (shift close + report)              |
+| 12  | permissions in `api` and RLS            | guards + ownership in SQL + RLS                     | `rls.test.ts`, `realtime.test.ts`, `storage.test.ts`, `lifecycle.test.ts` (role × route matrix) |
+| 13  | tracking cannot be guessed or leak      | 128-bit token, projection, separate channel         | `lifecycle.test.ts`, `abuse.test.ts` (enumeration), `realtime.test.ts`, e2e                     |
+| 14  | a photo is neither lost nor duplicated  | device-made id, advisory lock, sha256               | `invariants.test.ts`, `store.test.ts`, e2e (offline)                                            |
+| 15  | bad input is 4xx, never 5xx             | Zod everywhere + error mapping                      | `fuzz.test.ts` (~1 350 requests), `errors.test.ts`, `abuse.test.ts`                             |
+
+## Acceptance checklist
+
+| #   | Check                                                                               | Covered by                                                                       |
+| --- | ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| 1   | `cp .env.example .env && supabase start && docker compose up --build`               | this README; CI e2e job does exactly this                                        |
+| 2   | typecheck, lint, tests, CI                                                          | `pnpm lint typecheck test test:integration test:e2e`; `.github/workflows/ci.yml` |
+| 3   | create → assign → pick up → hand over                                               | `required.spec.ts` (four browsers), `lifecycle.test.ts`                          |
+| 4   | 45-minute release                                                                   | `outbox-and-jobs.test.ts` (incl. a real `pg_cron` run), `lifecycle.test.ts`      |
+| 5   | 3 failed attempts → returning → returned                                            | `lifecycle.test.ts`, `webhooks.test.ts` (all 12 notifications in order)          |
+| 6   | one key ×10, other body                                                             | `invariants.test.ts`                                                             |
+| 7   | 50 parallel creates                                                                 | `invariants.test.ts`, `constraints.test.ts`                                      |
+| 8   | two dispatchers; 7 active + 2                                                       | `invariants.test.ts`, `constraints.test.ts`                                      |
+| 9   | cancel and pickup together                                                          | `invariants.test.ts`                                                             |
+| 10  | offline handover, delivery reassigned                                               | `invariants.test.ts`                                                             |
+| 11  | the same batch twice                                                                | `invariants.test.ts`, `store.test.ts`                                            |
+| 12  | stub down for 10 minutes                                                            | `webhooks.test.ts` (fake clock), `required.spec.ts` (real stub)                  |
+| 13  | 20 parallel wrong codes                                                             | `invariants.test.ts`                                                             |
+| 14  | short cash                                                                          | `invariants.test.ts`, `ui.spec.ts`                                               |
+| 15  | foreign delivery, courier list, tracking enumeration via the API                    | `lifecycle.test.ts`, `abuse.test.ts`                                             |
+| 16  | the same with the `anon` key and another user's JWT, Realtime, another user's photo | `rls.test.ts`, `realtime.test.ts`, `storage.test.ts`                             |
+| 17  | offline handover with a photo, batch twice                                          | `invariants.test.ts`, `store.test.ts`, `required.spec.ts`                        |
+| 18  | board and report speed, filters, reload, Back                                       | `perf.test.ts` (≤ 26 ms), `ui.spec.ts`                                           |
+| 19  | courier app offline / reload / online                                               | `required.spec.ts`, `store.test.ts`                                              |
+| 20  | README matches behaviour                                                            | tests above reference the tables here                                            |
+
+## Known limits and decisions worth knowing
+
+- Rate limiting is in-process (no Redis, as required): correct for one API instance. With several instances each keeps
+  its own buckets (the database-side invariants and the webhook worker are safe with any number of instances).
+- The webhook SSRF check resolves the host before connecting; a DNS answer could change in between.
+- The courier app opens offline from the second visit on (the first visit installs the service worker); the handover code
+  is checked by the server, so a wrong code is reported after sync.
+- The dispatcher board lists the 25 oldest waiting deliveries per zone (first in, first out); any delivery can be found with
+  search and assigned from its card.
+- Local Supabase accepts the public demo JWT secret; production must use its own keys.
+- Bugs found by the tests while building (each has a regression test): lock-upgrade deadlocks (database triggers and the
+  action processor), tokens without `exp` accepted, slow request bodies, partial phone search, **signed photo URLs using the
+  internal Supabase address**, **`public/` missing from the web image (no service worker)**, **cached redirects looping after
+  sign-out**, a filter checkbox that lagged behind the URL.

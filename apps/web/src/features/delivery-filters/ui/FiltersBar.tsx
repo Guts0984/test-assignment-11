@@ -18,12 +18,15 @@ export function FiltersBar({
   const [draft, setDraft] = useState(value);
   useEffect(() => setDraft(value), [value]); // browser back/forward changes the URL → refresh the inputs
 
-  const toggle = (s: DeliveryStatus) =>
-    onApply({
+  const toggle = (s: DeliveryStatus) => {
+    const next = {
       ...draft,
       page: 1,
       status: draft.status.includes(s) ? draft.status.filter((x) => x !== s) : [...draft.status, s],
-    });
+    };
+    setDraft(next); // the checkbox responds at once; the URL follows
+    onApply(next);
+  };
 
   return (
     <form

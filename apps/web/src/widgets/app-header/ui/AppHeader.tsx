@@ -30,7 +30,7 @@ export function AppHeader() {
   return (
     <header className="border-b border-slate-200 bg-white">
       <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-6 gap-y-2 px-4 py-2">
-        <Link href="/" className="text-base font-semibold">
+        <Link href="/" prefetch={false} className="text-base font-semibold">
           {t('brand')}
         </Link>
         {!bare && (

@@ -180,12 +180,15 @@ describe('seed: internal consistency (these find generator bugs)', () => {
   });
 
   it('seeded notifications are all delivered and numbered 1..n per delivery', async () => {
+    // "released" notifications are produced live by the pg_cron job (and sent by the running worker): not seed history
     const r = await one(sql<{ pending: number; gaps: number }[]>`
       select count(*) filter (where status <> 'delivered')::int pending,
         (select count(*)::int from (
-          select delivery_id, count(*) c, max(seq) m, min(seq) mn from public.notifications
-          where sender_id = any(${SEED_SENDERS}) group by delivery_id having count(*) <> max(seq) or min(seq) <> 1) g) gaps
-      from public.notifications where sender_id = any(${SEED_SENDERS}) and created_at < now() - interval '1 hour'`);
+          select delivery_id from public.notifications
+          where sender_id = any(${SEED_SENDERS}) and event_type <> 'released'
+          group by delivery_id having count(*) <> max(seq) or min(seq) <> 1) g) gaps
+      from public.notifications
+      where sender_id = any(${SEED_SENDERS}) and event_type <> 'released' and created_at < now() - interval '1 hour'`);
     expect(r).toEqual({ pending: 0, gaps: 0 });
   });
 

@@ -1,0 +1,15 @@
+{
+  "name": "@courier/e2e",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test": "playwright test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@courier/db": "workspace:*",
+    "@courier/shared": "workspace:*",
+    "@playwright/test": "^1.55.0",
+    "@types/node": "^22"
+  }
+}

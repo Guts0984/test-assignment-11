@@ -1,12 +1,14 @@
 'use client';
 import { useSearchParams } from 'next/navigation';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslations } from 'next-intl';
 import { Alert, Button } from '@/shared/ui';
 import { DeliveryCard } from '@/widgets/delivery-card';
 import { CancelButton } from '@/features/cancel-delivery';
 import { UnblockButton } from '@/features/unblock-handover';
-import { markReturned } from '@/entities/board';
+import { fetchBoard, markReturned } from '@/entities/board';
+import { AssignDialog } from '@/features/assign-delivery';
 import { deliveryKeys } from '@/entities/delivery';
 
 function ReturnedButton({ id }: { id: string }) {
@@ -20,6 +22,22 @@ function ReturnedButton({ id }: { id: string }) {
     <Button variant="secondary" disabled={m.isPending} onClick={() => m.mutate()}>
       {t('markReturned')}
     </Button>
+  );
+}
+
+function AssignButton({ id, number, status }: { id: string; number: string; status: string }) {
+  const tb = useTranslations('board');
+  const [open, setOpen] = useState(false);
+  const board = useQuery({ queryKey: deliveryKeys.board, queryFn: fetchBoard, enabled: open });
+  return (
+    <>
+      <Button onClick={() => setOpen(true)}>{tb('assign')}</Button>
+      <AssignDialog
+        delivery={open ? { id, number, status } : null}
+        couriers={board.data?.couriers ?? []}
+        onClose={() => setOpen(false)}
+      />
+    </>
   );
 }
 
@@ -41,6 +59,10 @@ export function DeliveryDetailPage({
         actions={(c) => (
           <>
             {viewer === 'sender' && <CancelButton id={id} status={c.delivery.status} />}
+            {viewer === 'dispatcher' &&
+              ['created', 'failed_attempt', 'assigned'].includes(c.delivery.status) && (
+                <AssignButton id={id} number={c.delivery.number} status={c.delivery.status} />
+              )}
             {viewer === 'dispatcher' && c.delivery.handoverBlocked && <UnblockButton id={id} />}
             {viewer === 'dispatcher' && c.delivery.status === 'returning' && (
               <ReturnedButton id={id} />

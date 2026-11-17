@@ -5,6 +5,7 @@ import { sniffImage } from './image';
 import { escapeLike, searchIntent } from './search';
 import { generateCode, generateToken, safeEqual, sha256Hex, TOKEN_PATTERN } from './secrets';
 import { maskPhone, shortName } from './tracking';
+import { toPublicUrl } from './urls';
 
 describe('secrets', () => {
   it('codes are 6 digits, include leading zeros, and use the whole range', () => {
@@ -145,5 +146,23 @@ describe('app errors', () => {
     expect(isAppError(new Error('x'))).toBe(false);
     expect(isAppError('x')).toBe(false);
     expect(isAppError(null)).toBe(false);
+  });
+});
+
+describe('toPublicUrl', () => {
+  const internal = 'http://host.docker.internal:54321';
+  const pub = 'http://127.0.0.1:54321';
+  it('swaps the internal origin for the public one and keeps path and token', () => {
+    expect(
+      toPublicUrl(`${internal}/storage/v1/object/sign/b/x.jpg?token=abc.def`, internal, pub),
+    ).toBe(`${pub}/storage/v1/object/sign/b/x.jpg?token=abc.def`);
+    expect(toPublicUrl(`${internal}/a`, `${internal}/`, `${pub}/`)).toBe(`${pub}/a`);
+  });
+  it('leaves other URLs alone (including look-alike hosts)', () => {
+    expect(toPublicUrl('https://cdn.example/x', internal, pub)).toBe('https://cdn.example/x');
+    expect(toPublicUrl(`${internal}.evil.example/x`, internal, pub)).toBe(
+      `${internal}.evil.example/x`,
+    );
+    expect(toPublicUrl(pub + '/x', internal, pub)).toBe(`${pub}/x`);
   });
 });

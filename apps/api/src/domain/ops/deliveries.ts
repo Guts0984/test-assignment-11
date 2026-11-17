@@ -13,6 +13,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { appError } from '../errors';
 import { generateCode, generateToken, sha256Hex } from '../secrets';
 import { escapeLike, searchIntent } from '../search';
+import { toPublicUrl } from '../urls';
 import { addEvent, lockDelivery, notFound, type Ctx, type Tx } from './common';
 import { dispatcherDto, eventDto, senderDto } from './dto';
 
@@ -261,7 +262,7 @@ export async function signedPhotoUrls(
       return {
         id: p.id,
         kind: p.kind,
-        url: data.signedUrl,
+        url: toPublicUrl(data.signedUrl, ctx.env.internalSupabaseUrl, ctx.env.SUPABASE_URL),
         expiresAt: new Date(ctx.clock.now().getTime() + ttl * 1000).toISOString(),
       };
     }),

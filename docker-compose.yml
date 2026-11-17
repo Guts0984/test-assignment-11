@@ -1,0 +1,64 @@
+# Usage:  cp .env.example .env && supabase start && docker compose up --build
+# Supabase (Postgres, Auth, Realtime, Storage) runs from the Supabase CLI and applies the migrations, the bucket and the
+# seed by itself. These three services reach it through the host gateway.
+services:
+  api:
+    build: { context: ., dockerfile: Dockerfile.api }
+    ports: ['${API_PORT:-4000}:4000']
+    extra_hosts: ['host.docker.internal:host-gateway']
+    environment:
+      API_PORT: 4000
+      API_HOST: 0.0.0.0
+      API_CORS_ORIGINS: ${API_CORS_ORIGINS}
+      DATABASE_URL: ${DATABASE_INTERNAL_URL}
+      SUPABASE_URL: ${SUPABASE_URL} # must equal the token issuer the browser sees
+      SUPABASE_INTERNAL_URL: ${SUPABASE_INTERNAL_URL}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      WEBHOOK_ALLOWED_PRIVATE_HOSTS: ${WEBHOOK_ALLOWED_PRIVATE_HOSTS}
+      WEBHOOK_BACKOFF_BASE_SECONDS: ${WEBHOOK_BACKOFF_BASE_SECONDS:-30}
+      WEBHOOK_TIMEOUT_MS: ${WEBHOOK_TIMEOUT_MS:-10000}
+      TRUST_PROXY: 'false'
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:4000/health']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      args:
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+        NEXT_PUBLIC_DEFAULT_LOCALE: ${NEXT_PUBLIC_DEFAULT_LOCALE:-en}
+    ports: ['${WEB_PORT:-3000}:3000']
+    extra_hosts: ['host.docker.internal:host-gateway']
+    environment:
+      # server-side (middleware, redirects) reaches Supabase through the host gateway; the browser uses NEXT_PUBLIC_SUPABASE_URL
+      SUPABASE_INTERNAL_URL: ${SUPABASE_INTERNAL_URL}
+    depends_on: { api: { condition: service_healthy } }
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:3000/login']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # Receives the sender notifications: http://localhost:5000 shows them and switches between 200 / 500 / no answer.
+  sender-stub:
+    build: { context: ., dockerfile: Dockerfile.stub }
+    ports: ['${STUB_PORT:-5000}:5000']
+    environment:
+      STUB_PORT: 5000
+      STUB_HOST: 0.0.0.0
+      STUB_WEBHOOK_SECRET: ${STUB_WEBHOOK_SECRET}
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:5000/health']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped

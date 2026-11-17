@@ -11,14 +11,15 @@
     "typecheck": "pnpm -r typecheck",
     "lint": "eslint . && prettier --check . && pnpm --filter @courier/web lint:fsd",
     "format": "prettier --write .",
-    "test": "pnpm -r --filter '!@courier/db' --filter '!@courier/api' test && pnpm --filter @courier/api test:unit",
+    "test": "pnpm -r --filter '!@courier/db' --filter '!@courier/api' --filter '!@courier/e2e' test && pnpm --filter @courier/api test:unit",
     "supabase": "supabase",
     "db:start": "supabase start",
     "db:reset": "supabase db reset",
     "db:test": "pnpm --filter @courier/db test",
     "test:db": "pnpm --filter @courier/db test",
-    "test:all": "pnpm test && pnpm test:integration",
-    "test:integration": "pnpm --filter @courier/db test && pnpm --filter @courier/api test"
+    "test:all": "pnpm test && pnpm test:integration && pnpm test:e2e",
+    "test:integration": "pnpm --filter @courier/db test && pnpm --filter @courier/api test",
+    "test:e2e": "pnpm --filter @courier/e2e test"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.0",

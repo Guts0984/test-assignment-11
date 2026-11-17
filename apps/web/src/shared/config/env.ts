@@ -5,3 +5,6 @@ export const publicEnv = {
   apiUrl: process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000',
   defaultLocale: (process.env.NEXT_PUBLIC_DEFAULT_LOCALE ?? 'en') as 'en' | 'uk',
 } as const;
+
+/** Cookie name shared by browser, server and middleware (the default depends on the URL's hostname, which differs inside Docker). */
+export const AUTH_COOKIE = 'sb-courier-auth';

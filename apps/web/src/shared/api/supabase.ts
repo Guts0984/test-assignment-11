@@ -1,13 +1,15 @@
 'use client';
 import { createBrowserClient } from '@supabase/ssr';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { publicEnv } from '../config/env';
+import { AUTH_COOKIE, publicEnv } from '../config/env';
 
 let client: SupabaseClient | undefined;
 
 /** One browser client per tab; it keeps the session in cookies, which the middleware also reads. */
 export function getSupabase(): SupabaseClient {
-  client ??= createBrowserClient(publicEnv.supabaseUrl, publicEnv.supabaseAnonKey);
+  client ??= createBrowserClient(publicEnv.supabaseUrl, publicEnv.supabaseAnonKey, {
+    cookieOptions: { name: AUTH_COOKIE },
+  });
   return client;
 }
 
