@@ -169,3 +169,38 @@ export const assignSchema = z.strictObject({
   courierId: uuidSchema,
   reassign: z.boolean().default(false),
 });
+
+// ───────── notifications (sender webhooks) ─────────
+
+export const webhookSettingsSchema = z.strictObject({
+  url: z
+    .string()
+    .trim()
+    .max(2048)
+    .refine(
+      (v) => {
+        try {
+          const u = new URL(v);
+          return (u.protocol === 'http:' || u.protocol === 'https:') && !u.username && !u.password;
+        } catch {
+          return false;
+        }
+      },
+      { message: 'must be an http(s) URL without credentials' },
+    ),
+  secret: z
+    .string()
+    .min(8)
+    .max(128)
+    .regex(/^[\x21-\x7e]+$/, 'printable characters only, no spaces')
+    .optional(),
+});
+export type WebhookSettings = z.infer<typeof webhookSettingsSchema>;
+
+export const notificationListQuerySchema = z.strictObject({
+  status: z.enum(['pending', 'delivered']).optional(),
+  deliveryId: uuidSchema.optional(),
+  page,
+  pageSize,
+});
+export type NotificationListQuery = z.infer<typeof notificationListQuerySchema>;

@@ -28,13 +28,17 @@ import {
   quoteInputSchema,
   reportQuerySchema,
   uuidSchema,
+  notificationListQuerySchema,
+  webhookSettingsSchema,
+  type NotificationListQuery,
+  type WebhookSettings,
   type CourierBatch,
   type CreateDeliveryInput,
   type DeliveryListQuery,
   type ReportQuery,
 } from '@courier/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { CTX_TOKEN, STORAGE } from '../common/tokens';
+import { CTX_TOKEN, STORAGE, WORKER } from '../common/tokens';
 import { Limit, Public, Roles, type AuthedRequest } from '../common/guard';
 import { zod } from '../common/zod.pipe';
 import { appError } from '../domain/errors';
@@ -63,6 +67,14 @@ import {
   uploadPhoto,
 } from '../domain/ops/courier';
 import { trackingView } from '../domain/ops/tracking';
+import {
+  getNotification,
+  getWebhook,
+  listNotifications,
+  putWebhook,
+  resendNotification,
+  type WebhookWorker,
+} from '../domain/ops/notifications';
 
 /** Documents a Zod-validated body in Swagger (input side of the schema). */
 const docBody = (schema: ZodType) => {
@@ -298,5 +310,49 @@ export class TrackingController {
   @Get(':token')
   track(@Param('token') token: string) {
     return trackingView(this.ctx, token);
+  }
+}
+
+@ApiTags('notifications')
+@ApiBearerAuth()
+@Roles('sender')
+@Controller()
+export class NotificationsController {
+  constructor(
+    @Inject(CTX_TOKEN) private readonly ctx: Ctx,
+    @Inject(WORKER) private readonly worker: WebhookWorker,
+  ) {}
+
+  @Get('notifications')
+  list(
+    @Req() req: AuthedRequest,
+    @Query(zod(notificationListQuerySchema)) q: NotificationListQuery,
+  ) {
+    return listNotifications(this.ctx, user(req).id, q);
+  }
+
+  @Get('notifications/:id')
+  one(@Req() req: AuthedRequest, @Param('id', idParam) id: string) {
+    return getNotification(this.ctx, user(req).id, id);
+  }
+
+  /** Sends one attempt right now, with the same notification id, and logs it as a manual attempt. */
+  @Limit('sensitive')
+  @HttpCode(200)
+  @Post('notifications/:id/resend')
+  resend(@Req() req: AuthedRequest, @Param('id', idParam) id: string) {
+    return resendNotification(this.ctx, this.worker, user(req).id, id);
+  }
+
+  @Get('webhook')
+  webhook(@Req() req: AuthedRequest) {
+    return getWebhook(this.ctx, user(req).id);
+  }
+
+  @HttpCode(200)
+  @docBody(webhookSettingsSchema)
+  @Put('webhook')
+  setWebhook(@Req() req: AuthedRequest, @Body(zod(webhookSettingsSchema)) body: WebhookSettings) {
+    return putWebhook(this.ctx, this.worker, user(req).id, body);
   }
 }

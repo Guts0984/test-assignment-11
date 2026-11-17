@@ -23,10 +23,16 @@ import {
   CLOCK,
   CTX_TOKEN,
   LIMITERS,
+  WORKER,
   STORAGE,
   systemClock,
   type Clock,
 } from './common/tokens';
+import {
+  createWebhookWorker,
+  type WebhookWorker,
+  type WorkerDeps,
+} from './domain/ops/notifications';
 import { createDbHandle, createStorageClient } from './db/providers';
 import { createInflightGate, createRateLimiter } from './domain/rate-limit';
 import type { Ctx } from './domain/ops/common';
@@ -35,6 +41,7 @@ import {
   DeliveriesController,
   DispatchController,
   HealthController,
+  NotificationsController,
   TrackingController,
 } from './modules/controllers';
 
@@ -47,6 +54,8 @@ export type AppOptions = {
   storage?: SupabaseClient;
   /** Extra providers/controllers added by other blocks (webhook worker, notification endpoints). */
   extra?: { controllers?: unknown[]; providers?: unknown[] };
+  /** Tests inject a deterministic random / resolver for the webhook worker. */
+  worker?: Pick<WorkerDeps, 'fetchImpl' | 'random' | 'resolve'>;
 };
 
 export type RunningApp = {
@@ -54,6 +63,7 @@ export type RunningApp = {
   env: Env;
   ctx: Ctx;
   limiters: Limiters;
+  worker: WebhookWorker;
   url: string;
   close: () => Promise<void>;
 };
@@ -86,6 +96,7 @@ export async function createApp(opts: AppOptions = {}): Promise<RunningApp> {
   const limiters = buildLimiters(env);
   const ctx: Ctx = { db: dbHandle.db, env, clock };
   const verifier = opts.verifier ?? createAuthVerifier(env, opts.jwks);
+  const worker = createWebhookWorker({ ctx, ...(opts.worker ?? {}) });
   const gate = createInflightGate({
     perKey: env.MAX_INFLIGHT_PER_IP,
     global: env.MAX_INFLIGHT_GLOBAL,
@@ -98,6 +109,7 @@ export async function createApp(opts: AppOptions = {}): Promise<RunningApp> {
       DispatchController,
       CourierController,
       TrackingController,
+      NotificationsController,
       ...((opts.extra?.controllers ?? []) as never[]),
     ],
     providers: [
@@ -105,6 +117,7 @@ export async function createApp(opts: AppOptions = {}): Promise<RunningApp> {
       { provide: CLOCK, useValue: clock },
       { provide: STORAGE, useValue: storage },
       { provide: LIMITERS, useValue: limiters },
+      { provide: WORKER, useValue: worker },
       { provide: AUTH_VERIFIER, useValue: verifier },
       { provide: APP_GUARD, useClass: AppGuard },
       { provide: APP_FILTER, useClass: AllExceptionsFilter },
@@ -169,6 +182,7 @@ export async function createApp(opts: AppOptions = {}): Promise<RunningApp> {
   server.maxHeadersCount = 50;
   const stopGuard = installSlowClientGuard(server, env.HEADERS_TIMEOUT_MS, env.REQUEST_TIMEOUT_MS);
 
+  if (env.WEBHOOK_WORKER_ENABLED) worker.start();
   const addr = server.address();
   const port = typeof addr === 'object' && addr ? addr.port : env.API_PORT;
   return {
@@ -176,9 +190,11 @@ export async function createApp(opts: AppOptions = {}): Promise<RunningApp> {
     env,
     ctx,
     limiters,
+    worker,
     url: `http://127.0.0.1:${port}`,
     close: async () => {
       stopGuard();
+      worker.stop();
       await app.close();
       await dbHandle.close();
     },

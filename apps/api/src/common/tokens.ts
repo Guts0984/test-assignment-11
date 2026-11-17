@@ -4,6 +4,7 @@ export const DB = Symbol('DB');
 export const CLOCK = Symbol('CLOCK');
 export const STORAGE = Symbol('STORAGE');
 export const LIMITERS = Symbol('LIMITERS');
+export const WORKER = Symbol('WORKER');
 export const AUTH_VERIFIER = Symbol('AUTH_VERIFIER');
 
 export type Clock = { now(): Date };

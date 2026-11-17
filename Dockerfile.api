@@ -1,0 +1,18 @@
+# syntax=docker/dockerfile:1
+FROM node:22-alpine
+RUN corepack enable
+ENV NODE_ENV=production
+WORKDIR /repo
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json tsconfig.base.json ./
+COPY packages/shared/package.json packages/shared/
+COPY packages/db/package.json packages/db/
+COPY apps/api/package.json apps/api/
+RUN NODE_ENV=development pnpm install --frozen-lockfile --ignore-scripts --filter @courier/api...
+COPY packages/shared packages/shared
+COPY packages/db packages/db
+COPY apps/api apps/api
+RUN pnpm --filter @courier/shared build && pnpm --filter @courier/db build && pnpm --filter @courier/api build
+USER node
+WORKDIR /repo/apps/api
+EXPOSE 4000
+CMD ["node", "dist/main.js"]

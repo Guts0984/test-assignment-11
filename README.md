@@ -301,6 +301,39 @@ Bugs these tests found: the same lock-upgrade deadlock as in the database, this 
 tokens without an `exp` claim being accepted, a trickling request body not being cut off, partial phone numbers
 that look like full ones not matching by prefix, framework-wrapped JSON errors being reported as validation errors.
 
+## Sender notifications (webhooks)
+
+Every status change writes an outbox row in the **same transaction** (database trigger), so changes made by the
+`pg_cron` job and by the API are covered alike, and a rolled-back change leaves no notification. The `api` worker
+(`WEBHOOK_POLL_INTERVAL_MS`) sends them.
+
+- **Request:** `POST <sender url>` with the JSON payload (`id`, `deliveryId`, `number`, `event`, `status`,
+  `previousStatus`, `attemptNo`, `occurredAt`, `deviceTime`; never the code, tracking token, phone or address) and headers
+  `Webhook-Id` (the notification id, **the same on every retry and manual resend**), `Webhook-Timestamp` (unix seconds of
+  this attempt) and `Webhook-Signature: v1=<hex HMAC-SHA256(secret, "<id>.<timestamp>.<raw body>")>`. Any 2xx is success.
+- **Order:** only the head of each delivery's queue (the lowest pending `seq`) is eligible, so `delivered` can never
+  be sent before `picked_up` has been acknowledged. Different deliveries are independent.
+- **Retries:** pause = 30 s · 2^(n−1) ±20 % jitter, capped at 24 h, forever (nothing is dropped). A request that gets no
+  answer is cut after `WEBHOOK_TIMEOUT_MS` and counts as a failure (`timeout`). 3xx is a failure (redirects are never followed).
+- **Concurrency:** rows are claimed with `FOR UPDATE SKIP LOCKED` and stay locked while the request is in flight: several
+  workers or API instances never send the same notification twice.
+- **Time:** the worker uses the injected clock, so tests move time instead of sleeping.
+- **Sender UI/API:** `GET /notifications` (filters, paging), `GET /notifications/:id` (attempt log: status, error,
+  duration, manual flag), `POST /notifications/:id/resend` (one immediate attempt, logged as manual; it cannot complete a
+  notification out of order), `GET/PUT /webhook` (URL and secret).
+- **SSRF guard:** only http(s), no credentials in the URL, no private, loopback, link-local (cloud metadata), CGNAT or
+  `.internal`/`.local` addresses; hostnames are resolved and **every** address must be public. Hosts in
+  `WEBHOOK_ALLOWED_PRIVATE_HOSTS` (default `sender-stub,localhost,127.0.0.1`) are trusted. The check runs when saving
+  _and_ when sending. Known limit: a DNS answer can change between the check and the connection.
+- **Sender stub** (`apps/sender-stub`, port 5000): `POST /hook` records and verifies, `GET /` shows what arrived with a
+  switch **Answer 200 / Answer 500 / Do not answer**, `GET /api/received`, `POST /api/mode`, `POST /api/reset`.
+  The seeded senders all point at `http://sender-stub:5000/hook` with secret `whsec_demo_change_me`.
+
+Tests (`webhooks.test.ts`, 31, plus 5 for the stub): signatures checked by an independent implementation, ordering
+while an earlier notification fails, the 30 s … 24 h schedule over 16 attempts, "stub hangs for 10 minutes then
+works → everything arrives in order", same id on retries, parallel workers, the full three-failures flow, manual resend,
+16 forbidden URLs, DNS-rebinding style resolution, redirects, the background loop, no secrets in payloads.
+
 ## Money, tariff and rounding
 
 Money is always an integer number of kopecks.
