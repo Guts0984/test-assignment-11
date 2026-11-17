@@ -11,8 +11,13 @@
     "typecheck": "pnpm -r typecheck",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
-    "test": "pnpm -r test",
-    "supabase": "supabase"
+    "test": "pnpm -r --filter '!@courier/db' test",
+    "supabase": "supabase",
+    "db:start": "supabase start",
+    "db:reset": "supabase db reset",
+    "db:test": "pnpm --filter @courier/db test",
+    "test:db": "pnpm --filter @courier/db test",
+    "test:all": "pnpm test && pnpm test:db"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.0",

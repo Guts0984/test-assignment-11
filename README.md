@@ -19,14 +19,159 @@ phone (often offline), recipients follow a tracking link and tell the courier a 
 
 ```bash
 pnpm install
-pnpm build        # builds packages/shared (other packages depend on its dist)
+cp .env.example .env
+pnpm build            # builds packages/shared and packages/db (others depend on their dist)
 pnpm typecheck
 pnpm lint
-pnpm test
+pnpm test             # unit tests, no services needed
+pnpm supabase start   # local Postgres + Auth + Realtime + Storage; applies migrations and the seed
+pnpm test:db          # database tests, need the running Supabase stack
+pnpm db:reset         # rebuild the database from migrations + seed (about a minute, the seed is 50 000 rows)
 ```
 
 Code rules, enforced by ESLint: no `any`, no `@ts-ignore` without a written reason, and no classes outside
 NestJS building blocks.
+
+## Database (Supabase)
+
+`pnpm supabase start` runs the stack with only the services this project needs (Postgres 17, Auth, REST,
+Realtime, Storage; Studio, mail, analytics, edge runtime and the S3 protocol are disabled in
+`supabase/config.toml`). Migrations in `supabase/migrations` and `supabase/seed.sql` are applied automatically.
+The local demo keys in `.env.example` are the public defaults of the Supabase CLI. They are not secrets and
+must never be reused outside a development machine.
+
+Auth settings that matter: self sign-up is **disabled** (users come from the seed or the admin API),
+passwords need 8+ characters, and the sign-in rate limit is raised to 300 per 5 minutes per IP so that the
+test suite can log in many users. Production should use Supabase's defaults.
+
+### Demo logins (all created by the seed)
+
+| Role       | Emails                                               | Password              |
+| ---------- | ---------------------------------------------------- | --------------------- |
+| Sender     | `sender1@example.com` … `sender3@example.com`        | `Sender-Pass-123`     |
+| Dispatcher | `dispatcher1@example.com`, `dispatcher2@example.com` | `Dispatcher-Pass-123` |
+| Courier    | `courier01@example.com` … `courier30@example.com`    | `Courier-Pass-123`    |
+
+### Seed
+
+3 senders, 2 dispatchers, 30 couriers and **50 000 deliveries over the last 90 days**: 44 500 delivered,
+3 000 cancelled, 1 500 returned, 400 created, 300 waiting for a retry, 120 returning, 110 assigned, 70 picked
+up. Numbers are `DLV-000001` … `DLV-050000` without gaps. It also contains about 220 000 history events,
+a shift per courier per day (24 of 30 couriers are on shift today), cash figures for every closed shift with
+about 10 % of shifts handing in a different amount, five deliveries with a blocked handover, and 115 000
+already-delivered notifications. The generator is deterministic (hash based) and is checked by
+`packages/db/tests/seed.test.ts` (valid history chains, cash adds up, no courier above 8 active, ...).
+Seeded _assigned_ deliveries are younger than 45 minutes, so the background job releases them if nobody picks
+them up, which is the correct behaviour.
+
+### What the database enforces itself
+
+`apps/api` takes row locks and checks rules first so it can give good errors; the database refuses to
+store an illegal state even if the API has a bug.
+
+| Rule                                                                                                                         | Mechanism                                                                                                                                              | SQLSTATE |
+| ---------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | -------- |
+| Status transitions                                                                                                           | `deliveries_before_update` trigger, same table as in the status section                                                                                | `DL001`  |
+| At most 8 active deliveries per courier, also under concurrency                                                              | the trigger locks the courier row, then counts                                                                                                         | `DL002`  |
+| Assignment needs an open shift                                                                                               | same trigger                                                                                                                                           | `DL003`  |
+| Immutable columns (number, sender, price inputs, address, ...)                                                               | same trigger                                                                                                                                           | `DL004`  |
+| Deliveries are created as `created`                                                                                          | `deliveries_before_insert`                                                                                                                             | `DL005`  |
+| Gapless numbers `DLV-…`                                                                                                      | counter row updated inside the creating transaction; a rollback gives the number back. Callers cannot supply a number                                  | –        |
+| One active assignment per delivery                                                                                           | partial unique index on `assignments(delivery_id) where ended_at is null`                                                                              | `23505`  |
+| One open shift per courier                                                                                                   | partial unique index                                                                                                                                   | `23505`  |
+| Prices                                                                                                                       | CHECK constraints compare fee and commission with SQL copies of the tariff (a test proves SQL equals `@courier/shared` for 4 000 random inputs)        | `23514`  |
+| Courier attached exactly while `assigned`/`picked_up`/`delivered`; delivered needs the collected sum to equal the COD amount | CHECK constraints                                                                                                                                      | `23514`  |
+| Handover blocked only with 5 wrong codes; never more than 5                                                                  | CHECK constraints                                                                                                                                      | `23514`  |
+| Sender notifications                                                                                                         | `delivery_events` trigger writes the outbox row in the same transaction, numbered per delivery                                                         | –        |
+| 45-minute pickup timeout                                                                                                     | `app_private.release_stale_assignments(p_now)` called by `pg_cron` every minute; `FOR UPDATE SKIP LOCKED`; takes a clock argument so tests never sleep | –        |
+
+### Row Level Security (every table has RLS enabled)
+
+`anon` and `authenticated` have **no write privilege on any table**: all writes go through `apps/api`.
+`authenticated` can only `SELECT`, narrowed by these policies. The role is read from `app_metadata.role`,
+which only the service role can change (editing `user_metadata` does nothing; a test tries it).
+
+| Table                                                           | sender            | courier                                                                            | dispatcher | anon |
+| --------------------------------------------------------------- | ----------------- | ---------------------------------------------------------------------------------- | ---------- | ---- |
+| `deliveries`                                                    | own (`sender_id`) | assigned to them (`courier_id`)                                                    | all        | none |
+| `delivery_events`                                               | of own deliveries | of their deliveries                                                                | all        | none |
+| `assignments`                                                   | none              | own, including ended ones (this is how a courier learns a delivery was taken away) | all        | none |
+| `courier_actions`                                               | none              | own (including rejections and reasons)                                             | all        | none |
+| `photos` (metadata)                                             | of own deliveries | own                                                                                | all        | none |
+| `shifts`                                                        | none              | own                                                                                | all        | none |
+| `cash_adjustments`                                              | none              | none                                                                               | all        | none |
+| `notifications`, `notification_attempts`                        | own               | none                                                                               | none       | none |
+| `sender_webhooks` (signing secret)                              | own               | none                                                                               | none       | none |
+| `profiles`, `couriers`, `senders`                               | own row           | own row                                                                            | all        | none |
+| `delivery_secrets` (recipient code, tracking token and channel) | none              | none                                                                               | none       | none |
+| `idempotency_keys`, `delivery_number_counter`                   | none              | none                                                                               | none       | none |
+
+Tracking reads go through the API, which reads `delivery_secrets` with the server connection.
+Storage: bucket `delivery-photos` is private (5 MB, jpeg/png/webp). Browsers have no insert/update/delete
+policy. `storage.objects` has one `SELECT` policy (dispatchers, and senders for photos of their own deliveries) so
+signed URLs can only be created by them; paths are `<delivery id>/<photo id>.<ext>`.
+
+Internal functions live in the `app_private` schema, which PostgREST does not expose, and `EXECUTE` is
+revoked from everyone but the owner.
+
+### Realtime
+
+- `deliveries`, `assignments`, `shifts` and `courier_actions` are in the `supabase_realtime` publication, so
+  Realtime applies the policies above to each subscriber.
+- Tracking uses **Broadcast** on a private-by-obscurity channel `tracking:<tracking_channel>` (128 random bits,
+  separate from the URL token). A trigger sends only `number, status, attemptNo, courierName ("Olena K."),
+amountDueKop, updatedAt`. No address, phone or code. Anonymous clients get nothing from `postgres_changes`.
+- Findings worth knowing (both covered by tests):
+  - an anonymous `postgres_changes` subscription receives an empty error stub (`new: {}`, "401 Unauthorized") for
+    each change, never data;
+  - supabase-js joins a client's second and later channels with the **anon key** instead of the user's token.
+    Use one client (or one channel) per authenticated subscription.
+
+### Indexes
+
+| Index                                                                                                                  | Serves                                             |
+| ---------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| `deliveries(number)` unique                                                                                            | number lookup, gapless numbering backstop          |
+| `deliveries(sender_id, created_at desc, id)`                                                                           | sender list, newest first, keyset/offset paging    |
+| `deliveries(sender_id, status, created_at desc)`                                                                       | sender list filtered by status                     |
+| `deliveries(sender_id, recipient_phone)`                                                                               | sender search by phone (exact and prefix)          |
+| `deliveries(zone, created_at) where status in ('created','failed_attempt')`                                            | dispatcher queue per zone (tiny partial index)     |
+| `deliveries(courier_id) where status in ('assigned','picked_up')`                                                      | courier load `n/8`, courier work list, limit check |
+| `deliveries(courier_id, delivered_at desc) where status = 'delivered'`                                                 | courier history                                    |
+| `deliveries(assigned_at) where status = 'assigned'`                                                                    | 45-minute timeout scan                             |
+| `deliveries(delivered_at) where status = 'delivered'`, `deliveries(created_at)`, `deliveries(status, created_at desc)` | reports and board filters                          |
+| `deliveries(delivered_shift_id)`                                                                                       | cash totals per shift                              |
+| `assignments(delivery_id) where ended_at is null` unique                                                               | one courier per delivery                           |
+| `assignments(courier_id) where ended_at is null`, `(courier_id, assigned_at desc)`, `(delivery_id, assigned_at)`       | courier views, history                             |
+| `delivery_events(delivery_id, id)`                                                                                     | delivery history                                   |
+| `delivery_events(type, server_time)`                                                                                   | report: failed attempts by reason                  |
+| `shifts(courier_id) where closed_at is null` unique                                                                    | one open shift per courier                         |
+| `shifts(courier_id, opened_at desc)`, `shifts(closed_at)`                                                              | shift lists, report: discrepancies                 |
+| `notifications(next_attempt_at) where status = 'pending'`                                                              | worker: what is due                                |
+| `notifications(delivery_id, seq) where status = 'pending'`, unique `(delivery_id, seq)`                                | per-delivery ordering                              |
+| `notifications(sender_id, created_at desc, id)`                                                                        | sender notification log                            |
+| `courier_actions(courier_id, received_at desc) where result = 'rejected'`                                              | courier's rejected list                            |
+
+Measured on the seed (p95 of 20 runs, `packages/db/tests/perf.test.ts`, budget 300 ms): board queue 1 ms,
+courier load 3 ms, 90-day report 26 ms, sender list with filters 2 ms, searches 6 ms.
+
+### Database tests (`pnpm test:db`, ~390 tests, real Supabase, one file at a time)
+
+| File                      | What it tries to break                                                                                                                                                                                                                                           |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `constraints.test.ts`     | all 64 status pairs, the 9th active delivery, two concurrent assignments to a courier with 7 active (50 rounds), shift rules, immutable columns, 50 concurrent creates plus 20 rollbacks, every price/phone/weight/COD boundary, SQL tariff vs TypeScript tariff |
+| `outbox-and-jobs.test.ts` | outbox order and payload, rollback leaves no notification, 10 concurrent events, the 45-minute job at 44:59 / 45:00 / 45:01, skip-locked, **a real `pg_cron` run**                                                                                               |
+| `rls.test.ts`             | role × table visibility matrix against ground truth, writes refused on every table for every role, embedding tricks, forged / unsigned / tampered / expired JWTs, role escalation through `user_metadata`, sign-up                                               |
+| `realtime.test.ts`        | other users' changes never arrive, courier B sees the assignment removal, tracking payload has no address / phone / code                                                                                                                                         |
+| `storage.test.ts`         | who can sign which photo, path traversal, public URL, expiry, tampered token, uploads of non-images and 5 MB+ files                                                                                                                                              |
+| `seed.test.ts`            | seed shape and internal consistency, all 35 demo logins really work                                                                                                                                                                                              |
+| `perf.test.ts`            | board, report and list queries under 300 ms, indexes actually used                                                                                                                                                                                               |
+| `schema-drift.test.ts`    | the Drizzle schema equals the live database                                                                                                                                                                                                                      |
+
+Bugs these tests found while the block was written: a lock-upgrade **deadlock** between concurrent history
+inserts (fixed with a `BEFORE INSERT` lock trigger), a misleading error when assigning without a courier,
+Realtime stubs for anonymous subscribers, the Realtime second-channel token issue, and a Drizzle quirk that
+breaks `sql.json()` on the client it wraps.
 
 ## Money, tariff and rounding
 

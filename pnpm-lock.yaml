@@ -191,6 +191,34 @@ importers:
         specifier: ^8.46.0
         version: 8.72.2(eslint@9.39.5(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)
 
+  packages/db:
+    dependencies:
+      '@courier/shared':
+        specifier: workspace:*
+        version: link:../shared
+      drizzle-orm:
+        specifier: ^0.44.0
+        version: 0.44.7(postgres@3.4.9)
+      postgres:
+        specifier: ^3.4.0
+        version: 3.4.9
+    devDependencies:
+      '@supabase/supabase-js':
+        specifier: ^2.58.0
+        version: 2.119.0
+      '@types/node':
+        specifier: ^22
+        version: 22.20.5
+      fast-check:
+        specifier: ^4.10.2
+        version: 4.10.2
+      tsup:
+        specifier: ^8.5.0
+        version: 8.5.1(postcss@8.5.33)(supports-color@7.2.0)(typescript@5.9.3)
+      vitest:
+        specifier: ^3.2.0
+        version: 3.2.7(@types/node@22.20.5)(supports-color@7.2.0)
+
   packages/shared:
     dependencies:
       zod:
@@ -756,6 +784,10 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  '@supabase/auth-js@2.119.0':
+    resolution: {integrity: sha512-WI7KqJRxqZjm77PlRO/VfKretL4SG8g8stWfBmpyx9To+fFapZlSbXA8QkduoMvr72rRpIF24ZLrjktBrp+ZFA==}
+    engines: {node: '>=22.0.0'}
+
   '@supabase/cli-darwin-arm64@2.122.1':
     resolution: {integrity: sha512-yttIyKa7QU+yB6oxdErlI7zHYn2ohHSMqjNWzuOiZrwoMfMTCTk4/pbRrTUrL81rj1E0kC3SYNy1o4x6449/kA==}
     cpu: [arm64]
@@ -799,6 +831,34 @@ packages:
     resolution: {integrity: sha512-m0+Q0k/Jx9oPlTolb/vUmGT3eUuz/MSDSR5Tqe1kfnDl8ra0Fi84697iBUkEc0hD80vIqImBAsTjq6tzNggTlQ==}
     cpu: [x64]
     os: [win32]
+
+  '@supabase/functions-js@2.119.0':
+    resolution: {integrity: sha512-0aOdF/Y4lA+62K02nwZClfAthXmFEml0od42q3yy/9t3bBitomAOYEatTFSnxT/5UeeIDNn2DOnXTdAP0sqGNQ==}
+    engines: {node: '>=22.0.0'}
+
+  '@supabase/phoenix@0.4.5':
+    resolution: {integrity: sha512-aAn9H9ovVyeApKy11OWOrrOGq8DV68yWeH4ud2lN9fzn4aO8Zb5GLL9m1pUg9nLqIcT+ZDfAcsZe0E/nqdv2lw==}
+
+  '@supabase/postgrest-js@2.119.0':
+    resolution: {integrity: sha512-qBmcjEFO7Ptyf5qvOXYJa1s4bfA4zsMIFf2i+h2zd6RRTDLwquX8z1mnS9djNOJjbiO1OGFh5Y2Lc2k2pA8TMw==}
+    engines: {node: '>=22.0.0'}
+
+  '@supabase/realtime-js@2.119.0':
+    resolution: {integrity: sha512-fPzxt+SAYweqsZUCSZma2dvN+HT6lVjwWj8BbkVwapW6wNf1odUi+ATYN7svX4Zm9vt0kz0l0VzINAUAA38FEg==}
+    engines: {node: '>=22.0.0'}
+
+  '@supabase/storage-js@2.119.0':
+    resolution: {integrity: sha512-htx1dSCnSJVPlx2BNSgLSUDvLMxuGbYa6pUPl5xoCs4as4cIhBVwuxj78zbggCyPHxLnEXjsV/qvlDsVjpodKw==}
+    engines: {node: '>=22.0.0'}
+
+  '@supabase/supabase-js@2.119.0':
+    resolution: {integrity: sha512-MKP49G6bJbPhvsZDegZ/IXS/ITApPgplDCF5+F65KZ5kIArS5Y90WFxwvWYALx2bsxdrSuHvkCiXHYr3dU8+sw==}
+    engines: {node: '>=22.0.0'}
+    peerDependencies:
+      '@opentelemetry/api': '>=1.0.0'
+    peerDependenciesMeta:
+      '@opentelemetry/api':
+        optional: true
 
   '@types/chai@5.2.3':
     resolution: {integrity: sha512-Mw558oeA9fFbv65/y4mHtXDs9bPnFMZAL/jxdPFUpOHHIXX91mcgEHbS5Lahr+pwZFR8A7GQleRWeI6cGFC2UA==}
@@ -1015,6 +1075,98 @@ packages:
   deep-is@0.1.4:
     resolution: {integrity: sha512-oIPzksmTg4/MriiaYGO+okXDT7ztn/w3Eptv/+gSIdMdKsJo0u4CfYNFJPy+4SKMuCqGw2wxnA+URMg3t8a/bQ==}
 
+  drizzle-orm@0.44.7:
+    resolution: {integrity: sha512-quIpnYznjU9lHshEOAYLoZ9s3jweleHlZIAWR/jX9gAWNg/JhQ1wj0KGRf7/Zm+obRrYd9GjPVJg790QY9N5AQ==}
+    peerDependencies:
+      '@aws-sdk/client-rds-data': '>=3'
+      '@cloudflare/workers-types': '>=4'
+      '@electric-sql/pglite': '>=0.2.0'
+      '@libsql/client': '>=0.10.0'
+      '@libsql/client-wasm': '>=0.10.0'
+      '@neondatabase/serverless': '>=0.10.0'
+      '@op-engineering/op-sqlite': '>=2'
+      '@opentelemetry/api': ^1.4.1
+      '@planetscale/database': '>=1.13'
+      '@prisma/client': '*'
+      '@tidbcloud/serverless': '*'
+      '@types/better-sqlite3': '*'
+      '@types/pg': '*'
+      '@types/sql.js': '*'
+      '@upstash/redis': '>=1.34.7'
+      '@vercel/postgres': '>=0.8.0'
+      '@xata.io/client': '*'
+      better-sqlite3: '>=7'
+      bun-types: '*'
+      expo-sqlite: '>=14.0.0'
+      gel: '>=2'
+      knex: '*'
+      kysely: '*'
+      mysql2: '>=2'
+      pg: '>=8'
+      postgres: '>=3'
+      prisma: '*'
+      sql.js: '>=1'
+      sqlite3: '>=5'
+    peerDependenciesMeta:
+      '@aws-sdk/client-rds-data':
+        optional: true
+      '@cloudflare/workers-types':
+        optional: true
+      '@electric-sql/pglite':
+        optional: true
+      '@libsql/client':
+        optional: true
+      '@libsql/client-wasm':
+        optional: true
+      '@neondatabase/serverless':
+        optional: true
+      '@op-engineering/op-sqlite':
+        optional: true
+      '@opentelemetry/api':
+        optional: true
+      '@planetscale/database':
+        optional: true
+      '@prisma/client':
+        optional: true
+      '@tidbcloud/serverless':
+        optional: true
+      '@types/better-sqlite3':
+        optional: true
+      '@types/pg':
+        optional: true
+      '@types/sql.js':
+        optional: true
+      '@upstash/redis':
+        optional: true
+      '@vercel/postgres':
+        optional: true
+      '@xata.io/client':
+        optional: true
+      better-sqlite3:
+        optional: true
+      bun-types:
+        optional: true
+      expo-sqlite:
+        optional: true
+      gel:
+        optional: true
+      knex:
+        optional: true
+      kysely:
+        optional: true
+      mysql2:
+        optional: true
+      pg:
+        optional: true
+      postgres:
+        optional: true
+      prisma:
+        optional: true
+      sql.js:
+        optional: true
+      sqlite3:
+        optional: true
+
   eciesjs@0.5.0:
     resolution: {integrity: sha512-s0J9SEVYAEPg7J63GFMApLYzPH9VNIQIyC6s15JpnqVc0TqcKWdbgFlnAweEBRyMmko2dcs2sfC83Hj4J43tuA==}
     engines: {bun: '>=1', deno: '>=2.7.10', node: '>=16'}
@@ -1156,6 +1308,10 @@ packages:
   has-flag@4.0.0:
     resolution: {integrity: sha512-EykJT/Q1KjTWctppgIAgfSO0tKVuZUjhgMr17kqTumMl6Afv3EISleU7qZUzoXDFTAHTDC4NOoG/ZxU3EvlMPQ==}
     engines: {node: '>=8'}
+
+  iceberg-js@0.8.1:
+    resolution: {integrity: sha512-1dhVQZXhcHje7798IVM+xoo/1ZdVfzOMIc8/rgVSijRK38EDqOJoGula9N/8ZI5RD8QTxNQtK/Gozpr+qUqRRA==}
+    engines: {node: '>=20.0.0'}
 
   ignore@5.3.2:
     resolution: {integrity: sha512-hsBTNUqQTDwkWtcdYI2i06Y/nUBEsNEDJKjWdigLvegy8kDuJAS8uRlpkkcQpyEXL0Z/pjDy5HBmMjRCJ2gq+g==}
@@ -1333,6 +1489,10 @@ packages:
     resolution: {integrity: sha512-RVHEU9/Pp1Fnjr/MpAJsZoADukCKhfIi15OunEYiGktIkYLkPVvC1sioWolGDS7XByMTx9m/IGbro0Js13zhnQ==}
     engines: {node: ^10 || ^12 || >=14}
 
+  postgres@3.4.9:
+    resolution: {integrity: sha512-GD3qdB0x1z9xgFI6cdRD6xu2Sp2WCOEoe3mtnyB5Ee0XrrL5Pe+e4CCnJrRMnL1zYtRDZmQQVbvOttLnKDLnaw==}
+    engines: {node: '>=12'}
+
   prelude-ls@1.2.1:
     resolution: {integrity: sha512-vkcDPrRZo1QZLbn5RLGPpg/WmIQ65qoWWhcGKf/b5eplkkarX0m9z8ppCat4mlOqUsWpyNuYgO3VRyrYHSzX5g==}
     engines: {node: '>= 0.8.0'}
@@ -1457,6 +1617,9 @@ packages:
 
   ts-interface-checker@0.1.13:
     resolution: {integrity: sha512-Y/arvbn+rrz3JCKl9C4kVNfTfSm2/mEp5FSz5EsZSANGPSlQrpRI5M4PKF+mJnE52jOO90PnPSc3Ur3bTQw0gA==}
+
+  tslib@2.8.1:
+    resolution: {integrity: sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==}
 
   tsup@8.5.1:
     resolution: {integrity: sha512-xtgkqwdhpKWr3tKPmCkvYmS9xnQK3m3XgxZHwSUjvfTjp7YfXe5tT3GgWi0F2N+ZSMsOeWeZFh7ZZFg5iPhing==}
@@ -1920,6 +2083,10 @@ snapshots:
   '@rollup/rollup-win32-x64-msvc@4.68.3':
     optional: true
 
+  '@supabase/auth-js@2.119.0':
+    dependencies:
+      tslib: 2.8.1
+
   '@supabase/cli-darwin-arm64@2.122.1':
     optional: true
 
@@ -1943,6 +2110,34 @@ snapshots:
 
   '@supabase/cli-windows-x64@2.122.1':
     optional: true
+
+  '@supabase/functions-js@2.119.0':
+    dependencies:
+      tslib: 2.8.1
+
+  '@supabase/phoenix@0.4.5': {}
+
+  '@supabase/postgrest-js@2.119.0':
+    dependencies:
+      tslib: 2.8.1
+
+  '@supabase/realtime-js@2.119.0':
+    dependencies:
+      '@supabase/phoenix': 0.4.5
+      tslib: 2.8.1
+
+  '@supabase/storage-js@2.119.0':
+    dependencies:
+      iceberg-js: 0.8.1
+      tslib: 2.8.1
+
+  '@supabase/supabase-js@2.119.0':
+    dependencies:
+      '@supabase/auth-js': 2.119.0
+      '@supabase/functions-js': 2.119.0
+      '@supabase/postgrest-js': 2.119.0
+      '@supabase/realtime-js': 2.119.0
+      '@supabase/storage-js': 2.119.0
 
   '@types/chai@5.2.3':
     dependencies:
@@ -2186,6 +2381,10 @@ snapshots:
 
   deep-is@0.1.4: {}
 
+  drizzle-orm@0.44.7(postgres@3.4.9):
+    optionalDependencies:
+      postgres: 3.4.9
+
   eciesjs@0.5.0:
     dependencies:
       '@ecies/ciphers': 0.2.6(@noble/ciphers@1.3.0)
@@ -2382,6 +2581,8 @@ snapshots:
 
   has-flag@4.0.0: {}
 
+  iceberg-js@0.8.1: {}
+
   ignore@5.3.2: {}
 
   ignore@7.0.14: {}
@@ -2526,6 +2727,8 @@ snapshots:
       picocolors: 1.1.1
       source-map-js: 1.2.2
 
+  postgres@3.4.9: {}
+
   prelude-ls@1.2.1: {}
 
   prettier@3.10.1: {}
@@ -2654,6 +2857,8 @@ snapshots:
       typescript: 5.9.3
 
   ts-interface-checker@0.1.13: {}
+
+  tslib@2.8.1: {}
 
   tsup@8.5.1(postcss@8.5.33)(supports-color@7.2.0)(typescript@5.9.3):
     dependencies:
