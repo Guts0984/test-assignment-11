@@ -67,9 +67,10 @@ export const test = base.extend<Fx>({
       page.on('console', (m) => {
         if (m.type() !== 'error') return;
         const text = m.text();
-        // a deliberately offline browser and deliberately refused requests log network errors: not application bugs
+        // a deliberately offline browser and deliberately refused requests log network errors (Next also logs that it fell back
+        // to a normal page load when its background fetch fails offline): not application bugs
         if (
-          /Failed to load resource|net::ERR|ERR_INTERNET_DISCONNECTED|status of 4\d\d|favicon/i.test(
+          /Failed to load resource|net::ERR|ERR_INTERNET_DISCONNECTED|status of 4\d\d|favicon|Failed to fetch RSC payload/i.test(
             text,
           )
         )
